@@ -26,7 +26,9 @@ from PyQt5.QtGui import (
     QColor, QFont, QIcon, QPixmap, QPainter
 )
 from PyQt5.QtCore import Qt
-
+# 禁用 Qt 的 SSL 支持和网络探测（加速启动）
+import os
+os.environ['QT_QUICK_CONTROLS_STYLE'] = 'Fusion'   # 使用快速渲染引擎
 
 # ================== 全局异常钩子 ==================
 def global_exception_hook(exctype, value, tb):
@@ -1484,28 +1486,24 @@ class MainWindow(QMainWindow):
 
 
 if __name__ == '__main__':
+    import sys
+    from PyQt5.QtGui import QPixmap, QPainter, QFont
+    from PyQt5.QtCore import Qt
+
+    # 提前准备启动画面数据
+    pix = QPixmap('splash.png') if os.path.exists('splash.png') else None
+
     app = QApplication(sys.argv)
-    app.setWindowIcon(QIcon('app_icon.ico'))  # 确保图标文件存在
 
-    # 启动画面
-    splash_pix = QPixmap('splash.png')
-    if not splash_pix.isNull():
-        splash_pix = splash_pix.scaledToWidth(1400, Qt.SmoothTransformation)
+    if pix and not pix.isNull():
+        splash = QSplashScreen(pix)
+        splash.show()
+        app.processEvents()    # 立即显示，不等待后续处理
     else:
-        splash_pix = QPixmap(400, 200)
-        splash_pix.fill(Qt.white)
-        painter = QPainter(splash_pix)
-        painter.setFont(QFont('Arial', 20))
-        painter.drawText(splash_pix.rect(), Qt.AlignCenter, "自动报告工具")
-        painter.end()
-
-    splash = QSplashScreen(splash_pix)
-    splash.show()
-    splash.showMessage("正在启动...", Qt.AlignBottom | Qt.AlignCenter, Qt.black)
-    app.processEvents()
+        splash = None
 
     window = MainWindow()
-    splash.finish(window)
+    if splash:
+        splash.finish(window)
     window.show()
-
     sys.exit(app.exec_())
