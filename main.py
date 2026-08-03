@@ -30,6 +30,14 @@ from PyQt5.QtCore import Qt
 import os
 os.environ['QT_QUICK_CONTROLS_STYLE'] = 'Fusion'   # 使用快速渲染引擎
 
+
+def resource_path(relative_path):
+    """获取资源文件的绝对路径，支持开发环境和 PyInstaller 打包后的环境"""
+    if hasattr(sys, '_MEIPASS'):
+        # PyInstaller 打包后，资源文件在临时目录中
+        return os.path.join(sys._MEIPASS, relative_path)
+    # 开发环境，直接使用当前目录
+    return os.path.join(os.path.abspath("."), relative_path)
 # ================== 全局异常钩子 ==================
 def global_exception_hook(exctype, value, tb):
     error_msg = ''.join(traceback.format_exception(exctype, value, tb))
@@ -1486,24 +1494,29 @@ class MainWindow(QMainWindow):
 
 
 if __name__ == '__main__':
-    import sys
-    from PyQt5.QtGui import QPixmap, QPainter, QFont
-    from PyQt5.QtCore import Qt
-
-    # 提前准备启动画面数据
-    pix = QPixmap('splash.png') if os.path.exists('splash.png') else None
-
     app = QApplication(sys.argv)
+    app.setWindowIcon(QIcon(resource_path('app_icon.ico')))  # 图标也用 resource_path
 
-    if pix and not pix.isNull():
-        splash = QSplashScreen(pix)
-        splash.show()
-        app.processEvents()    # 立即显示，不等待后续处理
+    # 启动画面
+    splash_pix = QPixmap(resource_path('splash.png'))   # ← 关键修改
+    if not splash_pix.isNull():
+        splash_pix = splash_pix.scaledToWidth(600, Qt.SmoothTransformation)
     else:
-        splash = None
+        # 备用：纯白背景 + 文字
+        splash_pix = QPixmap(400, 200)
+        splash_pix.fill(Qt.white)
+        painter = QPainter(splash_pix)
+        painter.setFont(QFont('Arial', 20))
+        painter.drawText(splash_pix.rect(), Qt.AlignCenter, "自动报告工具")
+        painter.end()
+
+    splash = QSplashScreen(splash_pix)
+    splash.show()
+    splash.showMessage("正在启动...", Qt.AlignBottom | Qt.AlignCenter, Qt.black)
+    app.processEvents()
 
     window = MainWindow()
-    if splash:
-        splash.finish(window)
+    splash.finish(window)
     window.show()
+
     sys.exit(app.exec_())
