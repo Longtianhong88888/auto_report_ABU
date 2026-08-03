@@ -677,7 +677,7 @@ class BatchImageDialog(QDialog):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("自动报告工具")
+        self.setWindowTitle("自动M/PBO报告 Copyright © 2026 by ABU NPD EOL")
         self.setGeometry(100, 100, 1400, 850)
 
         self.template_wb = None
@@ -701,7 +701,7 @@ class MainWindow(QMainWindow):
         sheet_panel = QWidget()
         sheet_layout = QVBoxLayout(sheet_panel)
         sheet_layout.setContentsMargins(5, 5, 5, 5)
-        sheet_label = QLabel("模板Sheet列表")
+        sheet_label = QLabel("报告Sheet列表")
         sheet_label.setStyleSheet("font-weight: bold;")
         sheet_layout.addWidget(sheet_label)
         self.sheet_list = QListWidget()
@@ -712,10 +712,10 @@ class MainWindow(QMainWindow):
         center_widget = QWidget()
         center_layout = QVBoxLayout(center_widget)
         btn_layout = QHBoxLayout()
-        self.btn_open_template = QPushButton("打开模板文件")
+        self.btn_open_template = QPushButton("打开报告文件")
         self.btn_open_template.clicked.connect(self.open_template)
         btn_layout.addWidget(self.btn_open_template)
-        self.btn_open_source = QPushButton("打开数据源文件")
+        self.btn_open_source = QPushButton("打开IPQC数据源文件")
         self.btn_open_source.clicked.connect(self.open_source)
         btn_layout.addWidget(self.btn_open_source)
         center_layout.addLayout(btn_layout)
@@ -1500,7 +1500,7 @@ if __name__ == '__main__':
     # 启动画面
     splash_pix = QPixmap(resource_path('splash.png'))   # ← 关键修改
     if not splash_pix.isNull():
-        splash_pix = splash_pix.scaledToWidth(600, Qt.SmoothTransformation)
+        splash_pix = splash_pix.scaledToWidth(1600, Qt.SmoothTransformation)
     else:
         # 备用：纯白背景 + 文字
         splash_pix = QPixmap(400, 200)
