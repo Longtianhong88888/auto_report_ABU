@@ -3,32 +3,37 @@ import json
 import os
 import io
 import re
+import datetime
 import traceback
-from copy import copy
+import xml.etree.ElementTree as ET
 
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QTableWidget, QTableWidgetItem,
     QVBoxLayout, QHBoxLayout, QWidget, QPushButton, QLabel,
     QFileDialog, QMessageBox, QMenu, QAction, QListWidget,
-    QListWidgetItem, QDialog, QFormLayout, QLineEdit, QComboBox,
-    QDialogButtonBox, QAbstractItemView, QSpinBox, QSplitter,
-    QGroupBox, QRadioButton, QHeaderView, QDoubleSpinBox, QButtonGroup,
-    QCheckBox, QScrollArea, QSplashScreen
+    QListWidgetItem, QAbstractItemView, QSplitter, QSplashScreen, QHeaderView,
+    QDialog, QProgressDialog, QInputDialog, QLineEdit, QPlainTextEdit,
 )
-from PyQt5.QtGui import QColor, QFont
+from PyQt5.QtGui import QColor, QFont, QIcon, QPixmap, QPainter, QPalette
 from PyQt5.QtCore import Qt
 import openpyxl
 from openpyxl.utils import range_boundaries, get_column_letter, column_index_from_string
-from openpyxl.drawing.image import Image as OpenpyxlImage
-from PIL import Image as PILImage
-from PyQt5.QtWidgets import QSplashScreen
-from PyQt5.QtGui import (
-    QColor, QFont, QIcon, QPixmap, QPainter
+from openpyxl.styles.colors import COLOR_INDEX
+from constants import (
+    COL_WIDTH_PX_PER_CHAR, ROW_HEIGHT_PX_PER_PT,
+    DEFAULT_COL_WIDTH_CHARS, DEFAULT_COL_WIDTH_PX,
+    DEFAULT_ROW_HEIGHT_PTS, DEFAULT_ROW_HEIGHT_PX,
+    ADMIN_USER_ID, ADMIN_AUTH_PASSWORD,
 )
-from PyQt5.QtCore import Qt
-# 禁用 Qt 的 SSL 支持和网络探测（加速启动）
-import os
-os.environ['QT_QUICK_CONTROLS_STYLE'] = 'Fusion'   # 使用快速渲染引擎
+from user_auth import load_authorized_ids, save_authorized_ids, parse_id_input
+from safe_eval import _check_transform_expr
+from dialogs import (
+    ImageSetupDialog, TransformDialog, ArchiveConfigDialog, JMPConfigDialog,
+    SourceSelectDialog, InternalImageSelectDialog, BatchImageDialog,
+    VersionFinderDialog,
+)
+from mapping_operations import MappingOperations
+from version_finder import suggest_files
 
 
 def resource_path(relative_path):
@@ -42,642 +47,21 @@ def resource_path(relative_path):
 def global_exception_hook(exctype, value, tb):
     error_msg = ''.join(traceback.format_exception(exctype, value, tb))
     print(error_msg)
-    QMessageBox.critical(None, "程序错误", f"发生未处理异常：\n{value}")
+    # 无 QApplication 时（如导入期错误）直接退出，避免弹窗卡死
+    if QApplication.instance() is None:
+        sys.exit(1)
+    msg = QMessageBox(QMessageBox.Critical, "程序错误", f"发生未处理异常：\n{value}")
+    msg.setDetailedText(error_msg)
+    msg.exec_()
     sys.exit(1)
 
 sys.excepthook = global_exception_hook
 
 
-# ================== 统一尺寸常量 ==================
-COL_WIDTH_PX_PER_CHAR = 7.5
-ROW_HEIGHT_PX_PER_PT = 1.333
-DEFAULT_COL_WIDTH_CHARS = 8.0
-DEFAULT_ROW_HEIGHT_PTS = 15.0
-DEFAULT_COL_WIDTH_PX = int(DEFAULT_COL_WIDTH_CHARS * COL_WIDTH_PX_PER_CHAR)
-DEFAULT_ROW_HEIGHT_PX = int(DEFAULT_ROW_HEIGHT_PTS * ROW_HEIGHT_PX_PER_PT)
-
-
-# ================== 图片设置对话框 ==================
-class ImageSetupDialog(QDialog):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("图片设置")
-        layout = QFormLayout(self)
-
-        self.col_width = QDoubleSpinBox()
-        self.col_width.setRange(1.0, 100.0)
-        self.col_width.setDecimals(1)
-        self.col_width.setValue(8.0)
-        layout.addRow("列宽(字符):", self.col_width)
-
-        self.row_height = QDoubleSpinBox()
-        self.row_height.setRange(1.0, 500.0)
-        self.row_height.setDecimals(1)
-        self.row_height.setValue(15.0)
-        layout.addRow("行高(磅):", self.row_height)
-
-        self.rotation = QDoubleSpinBox()
-        self.rotation.setRange(-360.0, 360.0)
-        self.rotation.setDecimals(1)
-        self.rotation.setValue(0.0)
-        layout.addRow("旋转角度(正顺时针):", self.rotation)
-
-        self.width_scale = QDoubleSpinBox()
-        self.width_scale.setRange(0.1, 1.0)
-        self.width_scale.setSingleStep(0.1)
-        self.width_scale.setValue(1.0)
-        layout.addRow("宽度缩放比例:", self.width_scale)
-
-        self.height_scale = QDoubleSpinBox()
-        self.height_scale.setRange(0.1, 1.0)
-        self.height_scale.setSingleStep(0.1)
-        self.height_scale.setValue(1.0)
-        layout.addRow("高度缩放比例:", self.height_scale)
-
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addRow(buttons)
-
-    def get_values(self):
-        return (self.col_width.value(), self.row_height.value(),
-                self.rotation.value(),
-                self.width_scale.value(), self.height_scale.value())
-
-
-# ================== 数据转换规则对话框 ==================
-class TransformDialog(QDialog):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("数据转换规则")
-        layout = QVBoxLayout(self)
-
-        self.btn_group = QButtonGroup(self)
-        self.radio_none = QRadioButton("无转换")
-        self.radio_div1000 = QRadioButton("除以1000 (ms→s)")
-        self.radio_strip = QRadioButton("去除末尾字母")
-        self.radio_custom = QRadioButton("自定义表达式")
-        self.btn_group.addButton(self.radio_none, 0)
-        self.btn_group.addButton(self.radio_div1000, 1)
-        self.btn_group.addButton(self.radio_strip, 2)
-        self.btn_group.addButton(self.radio_custom, 3)
-        self.radio_none.setChecked(True)
-
-        layout.addWidget(self.radio_none)
-        layout.addWidget(self.radio_div1000)
-        layout.addWidget(self.radio_strip)
-        layout.addWidget(self.radio_custom)
-
-        self.custom_expr = QLineEdit()
-        self.custom_expr.setPlaceholderText("输入Python表达式，如 x/1000")
-        self.custom_expr.setEnabled(False)
-        self.radio_custom.toggled.connect(lambda checked: self.custom_expr.setEnabled(checked))
-        layout.addWidget(self.custom_expr)
-
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
-
-    def get_transform(self):
-        if self.radio_none.isChecked():
-            return 'none', ''
-        elif self.radio_div1000.isChecked():
-            return 'div1000', ''
-        elif self.radio_strip.isChecked():
-            return 'strip_letters', ''
-        else:
-            return 'custom', self.custom_expr.text()
-
-
-# ================== 归档配置对话框（动态输入框） ==================
-class ArchiveConfigDialog(QDialog):
-    def __init__(self, source_wb, template_range=None, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("归档配置")
-        self.setMinimumSize(800, 650)
-        self.source_wb = source_wb
-        self.selected_range = None
-        self.header_inputs = []  # 动态生成的表头输入框
-
-        main_layout = QVBoxLayout(self)
-        # 模板区域信息
-        if template_range:
-            min_row, min_col, max_row, max_col = template_range
-            rows = max_row - min_row + 1
-            info_text = f"📌 已选首列范围：{rows} 行（{get_column_letter(min_col)}{min_row}:{get_column_letter(min_col)}{max_row}）"
-        else:
-            info_text = "⚠️ 未获取到模板区域，请重新框选"
-        info_label = QLabel(info_text)
-        info_label.setStyleSheet("font-weight: bold; color: #2c3e50; background-color: #ecf0f1; padding: 5px;")
-        main_layout.addWidget(info_label)
-
-        # 表头行数选择（改变时动态生成输入框）
-        form = QFormLayout()
-        self.header_rows_spin = QSpinBox()
-        self.header_rows_spin.setMinimum(1)
-        self.header_rows_spin.setValue(1)
-        self.header_rows_spin.valueChanged.connect(self.on_header_rows_changed)
-        form.addRow("表头行数:", self.header_rows_spin)
-        main_layout.addLayout(form)
-
-        # 动态输入框容器
-        self.header_group = QGroupBox("新表头内容（每行一个输入框）")
-        self.header_layout = QVBoxLayout(self.header_group)
-        self.header_scroll = QScrollArea()
-        self.header_scroll.setWidgetResizable(True)
-        self.header_scroll.setWidget(self.header_group)
-        main_layout.addWidget(self.header_scroll)
-
-        # 源数据选择
-        sheet_layout = QHBoxLayout()
-        sheet_layout.addWidget(QLabel("源数据Sheet:"))
-        self.sheet_combo = QComboBox()
-        self.sheet_combo.addItems(source_wb.sheetnames)
-        self.sheet_combo.currentIndexChanged.connect(self.on_sheet_changed)
-        sheet_layout.addWidget(self.sheet_combo)
-        sheet_layout.addStretch()
-        main_layout.addLayout(sheet_layout)
-
-        self.table = QTableWidget()
-        self.table.setSelectionMode(QAbstractItemView.ContiguousSelection)
-        self.table.itemSelectionChanged.connect(self.on_selection_changed)
-        main_layout.addWidget(self.table)
-
-        bottom_layout = QHBoxLayout()
-        self.range_label = QLabel("未选择区域")
-        bottom_layout.addWidget(self.range_label)
-        self.hint_label = QLabel("")
-        bottom_layout.addWidget(self.hint_label)
-        bottom_layout.addStretch()
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        bottom_layout.addWidget(buttons)
-        main_layout.addLayout(bottom_layout)
-
-        self.load_sheet(source_wb.sheetnames[0])
-        self.on_header_rows_changed(1)  # 初始化输入框
-
-    def on_header_rows_changed(self, value):
-        # 清空并重新生成输入框
-        for i in reversed(range(self.header_layout.count())):
-            widget = self.header_layout.itemAt(i).widget()
-            if widget:
-                widget.setParent(None)
-        self.header_inputs.clear()
-        for i in range(value):
-            edit = QLineEdit()
-            edit.setPlaceholderText(f"第{i+1}行表头")
-            self.header_layout.addWidget(edit)
-            self.header_inputs.append(edit)
-
-    def on_sheet_changed(self, index):
-        self.load_sheet(self.sheet_combo.currentText())
-
-    def load_sheet(self, sheet_name):
-        ws = self.source_wb[sheet_name]
-        self.table.clear()
-        self.table.clearSpans()
-        real_max_row = ws.max_row
-        real_max_col = ws.max_column
-        if real_max_row > 200:
-            for r in range(real_max_row, 0, -1):
-                if any(cell.value is not None for cell in ws[r]):
-                    real_max_row = r
-                    break
-            real_max_row += 2
-        if real_max_col > 30:
-            for c in range(real_max_col, 0, -1):
-                if any(ws.cell(row=r, column=c).value is not None for r in range(1, real_max_row+1)):
-                    real_max_col = c
-                    break
-            real_max_col += 2
-        max_rows = min(real_max_row, 500)
-        max_cols = min(real_max_col, 100)
-
-        self.table.setRowCount(max_rows)
-        self.table.setColumnCount(max_cols)
-        self.table.setSelectionMode(QAbstractItemView.ContiguousSelection)
-
-        for merged_range in ws.merged_cells.ranges:
-            min_col, min_row, max_col, max_row = range_boundaries(str(merged_range))
-            if min_row > max_rows or min_col > max_cols:
-                continue
-            span_rows = min(max_row, max_rows) - min_row + 1
-            span_cols = min(max_col, max_cols) - min_col + 1
-            self.table.setSpan(min_row-1, min_col-1, span_rows, span_cols)
-
-        for row_idx, row in enumerate(ws.iter_rows(min_row=1, max_row=max_rows, max_col=max_cols), start=1):
-            for col_idx, cell in enumerate(row, start=1):
-                if cell.value is not None:
-                    item = QTableWidgetItem(str(cell.value))
-                    self.table.setItem(row_idx-1, col_idx-1, item)
-
-        self._apply_uniform_sizes(ws, max_cols, max_rows)
-        self.selected_range = None
-        self.range_label.setText("未选择区域")
-        self.hint_label.setText("")
-
-    def _apply_uniform_sizes(self, ws, max_cols, max_rows):
-        for col in range(1, max_cols + 1):
-            letter = get_column_letter(col)
-            if letter in ws.column_dimensions and ws.column_dimensions[letter].width:
-                width = int(ws.column_dimensions[letter].width * COL_WIDTH_PX_PER_CHAR)
-            else:
-                width = DEFAULT_COL_WIDTH_PX
-            self.table.setColumnWidth(col - 1, width)
-        for row in range(1, max_rows + 1):
-            if row in ws.row_dimensions and ws.row_dimensions[row].height:
-                height = int(ws.row_dimensions[row].height * ROW_HEIGHT_PX_PER_PT)
-            else:
-                height = DEFAULT_ROW_HEIGHT_PX
-            self.table.setRowHeight(row - 1, height)
-
-    def on_selection_changed(self):
-        indexes = self.table.selectedIndexes()
-        if not indexes:
-            self.selected_range = None
-            self.range_label.setText("未选择区域")
-            return
-        top = min(idx.row() for idx in indexes) + 1
-        left = min(idx.column() for idx in indexes) + 1
-        bottom = max(idx.row() for idx in indexes) + 1
-        right = max(idx.column() for idx in indexes) + 1
-        self.selected_range = (top, left, bottom, right)
-        rows = bottom - top + 1
-        cols = right - left + 1
-        addr = f"{get_column_letter(left)}{top}:{get_column_letter(right)}{bottom}  ({rows}行×{cols}列)"
-        self.range_label.setText(addr)
-
-    def get_selection(self):
-        header_rows = self.header_rows_spin.value()
-        headers = [edit.text() for edit in self.header_inputs]
-        sheet = self.sheet_combo.currentText()
-        if self.selected_range:
-            min_row, min_col, max_row, max_col = self.selected_range
-            range_str = f"{get_column_letter(min_col)}{min_row}:{get_column_letter(max_col)}{max_row}"
-        else:
-            range_str = ""
-        return header_rows, headers, sheet, range_str
-
-
-# ================== JMP配置对话框（动态列数） ==================
-class JMPConfigDialog(QDialog):
-    def __init__(self, template_wb, anchor_cell, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("JMP数据区配置")
-        self.setMinimumSize(600, 450)
-        self.template_wb = template_wb
-        self.anchor_cell = anchor_cell
-        self.header_inputs = []  # 动态生成的表头输入框
-
-        layout = QVBoxLayout(self)
-
-        info_label = QLabel(f"📍 锚点单元格: {anchor_cell}")
-        info_label.setStyleSheet("font-weight: bold; color: #2c3e50;")
-        layout.addWidget(info_label)
-
-        # 表头列数选择
-        header_form = QFormLayout()
-        self.header_cols_spin = QSpinBox()
-        self.header_cols_spin.setMinimum(1)
-        self.header_cols_spin.setValue(2)
-        self.header_cols_spin.valueChanged.connect(self.on_header_cols_changed)
-        header_form.addRow("表头列数:", self.header_cols_spin)
-        layout.addLayout(header_form)
-
-        # 动态输入框容器
-        self.header_group = QGroupBox("表头内容（每列一个输入框）")
-        self.header_layout = QVBoxLayout(self.header_group)
-        self.header_scroll = QScrollArea()
-        self.header_scroll.setWidgetResizable(True)
-        self.header_scroll.setWidget(self.header_group)
-        layout.addWidget(self.header_scroll)
-
-        # 源数据区域
-        source_group = QGroupBox("源数据区域（从模板Sheet中选择）")
-        source_layout = QFormLayout(source_group)
-        self.sheet_combo = QComboBox()
-        self.sheet_combo.addItems(template_wb.sheetnames)
-        source_layout.addRow("源Sheet:", self.sheet_combo)
-
-        range_layout = QHBoxLayout()
-        self.range_edit = QLineEdit()
-        self.range_edit.setPlaceholderText("例如 C2:E10，或点击右侧按钮框选")
-        range_layout.addWidget(self.range_edit)
-        btn_select = QPushButton("框选区域")
-        btn_select.clicked.connect(self.select_range)
-        range_layout.addWidget(btn_select)
-        source_layout.addRow("源区域:", range_layout)
-        layout.addWidget(source_group)
-
-        self.merge_cols_check = QCheckBox("将多列数据拼接为单列（先行后列）")
-        layout.addWidget(self.merge_cols_check)
-
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
-
-        self.on_header_cols_changed(2)  # 初始化输入框
-
-    def on_header_cols_changed(self, value):
-        # 清空并重新生成输入框
-        for i in reversed(range(self.header_layout.count())):
-            widget = self.header_layout.itemAt(i).widget()
-            if widget:
-                widget.setParent(None)
-        self.header_inputs.clear()
-        for i in range(value):
-            edit = QLineEdit()
-            edit.setPlaceholderText(f"第{i+1}列表头")
-            self.header_layout.addWidget(edit)
-            self.header_inputs.append(edit)
-
-    def select_range(self):
-        sheet_name = self.sheet_combo.currentText()
-        if not sheet_name:
-            return
-        dlg = SourceSelectDialog(self.template_wb, self)
-        dlg.sheet_combo.setCurrentText(sheet_name)
-        if dlg.exec_():
-            sel_sheet, sel_range = dlg.get_selection()
-            if sel_range:
-                self.range_edit.setText(sel_range)
-
-    def get_config(self):
-        headers = [edit.text() for edit in self.header_inputs]
-        return {
-            'header_cols': headers,
-            'source_sheet': self.sheet_combo.currentText(),
-            'source_range': self.range_edit.text(),
-            'merge_columns': self.merge_cols_check.isChecked()
-        }
-
-
-# ================== 源数据选择对话框 ==================
-class SourceSelectDialog(QDialog):
-    def __init__(self, source_wb, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("选择数据源区域")
-        self.setMinimumSize(800, 600)
-        self.source_wb = source_wb
-        self.selected_range = None
-
-        main_layout = QVBoxLayout(self)
-        top_layout = QHBoxLayout()
-        top_layout.addWidget(QLabel("源Sheet:"))
-        self.sheet_combo = QComboBox()
-        self.sheet_combo.addItems(source_wb.sheetnames)
-        self.sheet_combo.currentIndexChanged.connect(self.on_sheet_changed)
-        top_layout.addWidget(self.sheet_combo)
-        top_layout.addStretch()
-        main_layout.addLayout(top_layout)
-
-        self.table = QTableWidget()
-        self.table.setSelectionMode(QAbstractItemView.ContiguousSelection)
-        self.table.itemSelectionChanged.connect(self.on_selection_changed)
-        main_layout.addWidget(self.table)
-
-        bottom_layout = QHBoxLayout()
-        self.range_label = QLabel("未选择区域")
-        bottom_layout.addWidget(self.range_label)
-        bottom_layout.addStretch()
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        bottom_layout.addWidget(buttons)
-        main_layout.addLayout(bottom_layout)
-
-        self.load_sheet(source_wb.sheetnames[0])
-
-    def on_sheet_changed(self, index):
-        self.load_sheet(self.sheet_combo.currentText())
-
-    def load_sheet(self, sheet_name):
-        ws = self.source_wb[sheet_name]
-        self.table.clear()
-        self.table.clearSpans()
-        real_max_row = ws.max_row
-        real_max_col = ws.max_column
-        if real_max_row > 200:
-            for r in range(real_max_row, 0, -1):
-                if any(cell.value is not None for cell in ws[r]):
-                    real_max_row = r
-                    break
-            real_max_row += 2
-        if real_max_col > 30:
-            for c in range(real_max_col, 0, -1):
-                if any(ws.cell(row=r, column=c).value is not None for r in range(1, real_max_row+1)):
-                    real_max_col = c
-                    break
-            real_max_col += 2
-        max_rows = min(real_max_row, 500)
-        max_cols = min(real_max_col, 100)
-
-        self.table.setRowCount(max_rows)
-        self.table.setColumnCount(max_cols)
-
-        for merged_range in ws.merged_cells.ranges:
-            min_col, min_row, max_col, max_row = range_boundaries(str(merged_range))
-            if min_row > max_rows or min_col > max_cols:
-                continue
-            span_rows = min(max_row, max_rows) - min_row + 1
-            span_cols = min(max_col, max_cols) - min_col + 1
-            self.table.setSpan(min_row-1, min_col-1, span_rows, span_cols)
-
-        for row_idx, row in enumerate(ws.iter_rows(min_row=1, max_row=max_rows, max_col=max_cols), start=1):
-            for col_idx, cell in enumerate(row, start=1):
-                if cell.value is not None:
-                    item = QTableWidgetItem(str(cell.value))
-                    self.table.setItem(row_idx-1, col_idx-1, item)
-
-        self._apply_uniform_sizes(ws, max_cols, max_rows)
-        self.selected_range = None
-        self.range_label.setText("未选择区域")
-
-    def _apply_uniform_sizes(self, ws, max_cols, max_rows):
-        for col in range(1, max_cols + 1):
-            letter = get_column_letter(col)
-            if letter in ws.column_dimensions and ws.column_dimensions[letter].width:
-                width = int(ws.column_dimensions[letter].width * COL_WIDTH_PX_PER_CHAR)
-            else:
-                width = DEFAULT_COL_WIDTH_PX
-            self.table.setColumnWidth(col - 1, width)
-        for row in range(1, max_rows + 1):
-            if row in ws.row_dimensions and ws.row_dimensions[row].height:
-                height = int(ws.row_dimensions[row].height * ROW_HEIGHT_PX_PER_PT)
-            else:
-                height = DEFAULT_ROW_HEIGHT_PX
-            self.table.setRowHeight(row - 1, height)
-
-    def on_selection_changed(self):
-        indexes = self.table.selectedIndexes()
-        if not indexes:
-            self.selected_range = None
-            self.range_label.setText("未选择区域")
-            return
-        top = min(idx.row() for idx in indexes) + 1
-        left = min(idx.column() for idx in indexes) + 1
-        bottom = max(idx.row() for idx in indexes) + 1
-        right = max(idx.column() for idx in indexes) + 1
-        self.selected_range = (top, left, bottom, right)
-        addr = f"{get_column_letter(left)}{top}:{get_column_letter(right)}{bottom}"
-        self.range_label.setText(addr)
-
-    def get_selection(self):
-        sheet_name = self.sheet_combo.currentText()
-        if self.selected_range:
-            min_row, min_col, max_row, max_col = self.selected_range
-            range_str = f"{get_column_letter(min_col)}{min_row}:{get_column_letter(max_col)}{max_row}"
-        else:
-            range_str = ""
-        return sheet_name, range_str
-
-
-# ================== 内部图片选择对话框 ==================
-class InternalImageSelectDialog(QDialog):
-    def __init__(self, cached_images, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("选择图片（可多选）")
-        self.setMinimumSize(650, 450)
-        self.cached_images = cached_images
-
-        layout = QVBoxLayout(self)
-        filter_layout = QHBoxLayout()
-        filter_layout.addWidget(QLabel("筛选Sheet:"))
-        self.sheet_filter = QComboBox()
-        sheets = sorted(list(set(img[0] for img in cached_images)))
-        self.sheet_filter.addItem("全部")
-        self.sheet_filter.addItems(sheets)
-        self.sheet_filter.currentIndexChanged.connect(self.filter_images)
-        filter_layout.addWidget(self.sheet_filter)
-        filter_layout.addStretch()
-        layout.addLayout(filter_layout)
-
-        self.table = QTableWidget()
-        self.table.setColumnCount(3)
-        self.table.setHorizontalHeaderLabels(["位置", "Sheet", "尺寸"])
-        self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        layout.addWidget(self.table)
-
-        btn_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        btn_box.accepted.connect(self.accept)
-        btn_box.rejected.connect(self.reject)
-        layout.addWidget(btn_box)
-
-        self.populate_table(cached_images)
-
-    def populate_table(self, images):
-        self.table.setRowCount(len(images))
-        for i, (sheet, idx, pos, data, w, h) in enumerate(images):
-            self.table.setItem(i, 0, QTableWidgetItem(pos))
-            self.table.setItem(i, 1, QTableWidgetItem(sheet))
-            self.table.setItem(i, 2, QTableWidgetItem(f"{w}×{h}"))
-        self.table.resizeColumnsToContents()
-
-    def filter_images(self):
-        filter_sheet = self.sheet_filter.currentText()
-        if filter_sheet == "全部":
-            filtered = self.cached_images
-        else:
-            filtered = [img for img in self.cached_images if img[0] == filter_sheet]
-        self.populate_table(filtered)
-
-    def get_selected_images(self):
-        selected_rows = set(idx.row() for idx in self.table.selectedIndexes())
-        filter_sheet = self.sheet_filter.currentText()
-        if filter_sheet == "全部":
-            current_images = self.cached_images
-        else:
-            current_images = [img for img in self.cached_images if img[0] == filter_sheet]
-        result = []
-        for row in sorted(selected_rows):
-            if row < len(current_images):
-                result.append(current_images[row])
-        return result
-
-
-# ================== 批量图片对话框 ==================
-class BatchImageDialog(QDialog):
-    def __init__(self, cached_images, rows, cols, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("批量图片配置")
-        self.setMinimumSize(750, 500)
-        self.cached_images = cached_images
-        self.target_rows = rows
-        self.target_cols = cols
-        self.image_list = []
-
-        layout = QVBoxLayout(self)
-        layout.addWidget(QLabel(f"目标区域：{rows} 行 × {cols} 列，共需 {rows*cols} 张图片"))
-
-        source_group = QGroupBox("图片来源")
-        source_layout = QVBoxLayout(source_group)
-        self.radio_internal = QRadioButton("从数据源提取")
-        self.radio_file = QRadioButton("从外部文件选择")
-        self.radio_internal.setChecked(True)
-        source_layout.addWidget(self.radio_internal)
-        source_layout.addWidget(self.radio_file)
-        layout.addWidget(source_group)
-
-        self.image_table = QTableWidget()
-        self.image_table.setColumnCount(2)
-        self.image_table.setHorizontalHeaderLabels(["序号", "来源"])
-        self.image_table.horizontalHeader().setStretchLastSection(True)
-        layout.addWidget(self.image_table)
-
-        btn_layout = QHBoxLayout()
-        self.btn_add = QPushButton("添加图片")
-        self.btn_add.clicked.connect(self.add_images)
-        btn_layout.addWidget(self.btn_add)
-        self.btn_clear = QPushButton("清空列表")
-        self.btn_clear.clicked.connect(self.clear_images)
-        btn_layout.addWidget(self.btn_clear)
-        btn_layout.addStretch()
-        layout.addLayout(btn_layout)
-
-        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        button_box.accepted.connect(self.accept)
-        button_box.rejected.connect(self.reject)
-        layout.addWidget(button_box)
-
-    def add_images(self):
-        if self.radio_internal.isChecked():
-            dlg = InternalImageSelectDialog(self.cached_images, self)
-            if dlg.exec_():
-                selected = dlg.get_selected_images()
-                for item in selected:
-                    self.image_list.append(('internal', item))
-                    row = self.image_table.rowCount()
-                    self.image_table.insertRow(row)
-                    self.image_table.setItem(row, 0, QTableWidgetItem(str(row+1)))
-                    self.image_table.setItem(row, 1, QTableWidgetItem(item[2]))
-        else:
-            files, _ = QFileDialog.getOpenFileNames(self, "选择图片文件", "",
-                                                    "图片文件 (*.png *.jpg *.jpeg *.bmp *.gif);;所有文件 (*)")
-            for f in files:
-                self.image_list.append(('file', f))
-                row = self.image_table.rowCount()
-                self.image_table.insertRow(row)
-                self.image_table.setItem(row, 0, QTableWidgetItem(str(row+1)))
-                self.image_table.setItem(row, 1, QTableWidgetItem(os.path.basename(f)))
-
-    def clear_images(self):
-        self.image_list.clear()
-        self.image_table.setRowCount(0)
-
-    def get_image_sequence(self):
-        return self.image_list
-
-
-# ================== 主窗口 ==================
-class MainWindow(QMainWindow):
+class MainWindow(QMainWindow, MappingOperations):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("自动M/PBO报告 Copyright © 2026 by ABU NPD EOL")
+        self.setWindowTitle("自动M/PBO报告制作软件")
         self.setGeometry(100, 100, 1400, 850)
 
         self.template_wb = None
@@ -687,8 +71,12 @@ class MainWindow(QMainWindow):
         self.current_sheet_name = None
         self.mappings = []
         self.current_selection = None
+        self.cell_edits = []
         self._image_streams = []
         self.cached_images = []
+        self._fill_warnings = []
+        self._theme_owner = None
+        self._theme_map = {}
 
         self.init_ui()
 
@@ -723,6 +111,12 @@ class MainWindow(QMainWindow):
         self.table.setSelectionMode(QAbstractItemView.ContiguousSelection)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self.show_context_menu)
+        # 强制白色底，避免系统深色模式下无填充单元格显示为黑色
+        table_palette = self.table.palette()
+        table_palette.setColor(QPalette.Base, QColor("#FFFFFF"))
+        table_palette.setColor(QPalette.AlternateBase, QColor("#F7F7F7"))
+        table_palette.setColor(QPalette.Window, QColor("#FFFFFF"))
+        self.table.setPalette(table_palette)
         center_layout.addWidget(self.table)
 
         # 右侧
@@ -730,6 +124,9 @@ class MainWindow(QMainWindow):
         right_layout = QVBoxLayout(right_widget)
         right_layout.addWidget(QLabel("当前Sheet映射列表"))
         self.mapping_list = QListWidget()
+        self.mapping_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.mapping_list.customContextMenuRequested.connect(self.show_mapping_context_menu)
+        self.mapping_list.setToolTip("右键可删除或清空映射")
         right_layout.addWidget(self.mapping_list)
 
         self.btn_confirm_mapping = QPushButton("确认映射")
@@ -740,9 +137,13 @@ class MainWindow(QMainWindow):
         self.btn_output_report.clicked.connect(self.output_report)
         right_layout.addWidget(self.btn_output_report)
 
-        self.btn_save_config = QPushButton("保存配置为模板")
+        self.btn_save_config = QPushButton("保存配置")
         self.btn_save_config.clicked.connect(self.save_config)
         right_layout.addWidget(self.btn_save_config)
+
+        self.btn_import_config = QPushButton("导入我的配置")
+        self.btn_import_config.clicked.connect(self.import_config)
+        right_layout.addWidget(self.btn_import_config)
 
         splitter = QSplitter(Qt.Horizontal)
         splitter.addWidget(sheet_panel)
@@ -750,6 +151,9 @@ class MainWindow(QMainWindow):
         splitter.addWidget(right_widget)
         splitter.setSizes([220, 700, 280])
         main_layout.addWidget(splitter)
+
+        # 底部版权信息
+        self.statusBar().addPermanentWidget(QLabel("Copyright © 2026 by ABU NPD EOL"))
 
     # ==================== 文件加载 ====================
     def open_template(self):
@@ -762,18 +166,10 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "错误", f"无法打开模板文件：{e}")
             return
+        self._snapshot_template_images()
 
-        config_path = path.rsplit('.', 1)[0] + '_config.json'
-        if os.path.exists(config_path):
-            try:
-                with open(config_path, 'r', encoding='utf-8') as f:
-                    config = json.load(f)
-                self.mappings = config.get('mappings', [])
-            except Exception as e:
-                QMessageBox.warning(self, "警告", f"配置文件读取失败：{e}")
-                self.mappings = []
-        else:
-            self.mappings = []
+        # 配置不再随报告自动加载，由用户点击“导入我的配置”手动导入
+        self.mappings = []
 
         self.sheet_list.clear()
         for name in self.template_wb.sheetnames:
@@ -792,8 +188,15 @@ class MainWindow(QMainWindow):
         if not path:
             return
         self.source_path = path
+        busy = self._make_busy_progress("正在打开 IPQC 数据源，请稍等…")
         try:
             self.source_wb = openpyxl.load_workbook(path)
+        except Exception as e:
+            self._close_progress(busy)
+            QMessageBox.critical(self, "错误", f"无法打开数据源文件：{e}")
+            return
+        self._close_progress(busy)
+        try:
             self._cache_all_images()
         except Exception as e:
             QMessageBox.critical(self, "错误", f"无法打开数据源文件：{e}")
@@ -802,6 +205,9 @@ class MainWindow(QMainWindow):
 
     def _cache_all_images(self):
         self.cached_images = []
+        total = sum(len(ws._images) for ws in self.source_wb.worksheets)
+        prog = self._make_progress("正在读取数据源图片，请稍等…", total)
+        done = 0
         for sheet_name in self.source_wb.sheetnames:
             ws = self.source_wb[sheet_name]
             for idx, img in enumerate(ws._images):
@@ -819,16 +225,218 @@ class MainWindow(QMainWindow):
                         img_data = img.ref.read()
                     except Exception as e:
                         print(f"警告：无法读取图片 {pos}：{e}")
+                        done += 1
+                        self._update_progress(prog, done, total)
                         continue
                 width = getattr(img, 'width', '')
                 height = getattr(img, 'height', '')
                 self.cached_images.append((sheet_name, idx, pos, img_data, width, height))
+                done += 1
+                self._update_progress(prog, done, total)
+        self._close_progress(prog)
+
+    def _make_progress(self, label, total):
+        """创建模态进度条弹窗（不可取消；立即显示）"""
+        if total <= 0:
+            return None
+        dlg = QProgressDialog(label, None, 0, total, self)
+        dlg.setWindowTitle("处理中")
+        dlg.setWindowModality(Qt.WindowModal)
+        dlg.setCancelButton(None)
+        dlg.setMinimumDuration(0)
+        dlg.setValue(0)
+        dlg.show()
+        QApplication.processEvents()
+        return dlg
+
+    def _make_busy_progress(self, label):
+        """创建不确定进度的等待弹窗（用于保存等无法计数的阶段）"""
+        dlg = QProgressDialog(label, None, 0, 0, self)
+        dlg.setWindowTitle("处理中")
+        dlg.setWindowModality(Qt.WindowModal)
+        dlg.setCancelButton(None)
+        dlg.setMinimumDuration(0)
+        dlg.setValue(0)
+        dlg.show()
+        QApplication.processEvents()
+        return dlg
+
+    @staticmethod
+    def _update_progress(dlg, value, total):
+        if dlg is None or total <= 0:
+            return
+        dlg.setValue(min(value, total))
+        QApplication.processEvents()
+
+    @staticmethod
+    def _close_progress(dlg):
+        if dlg is not None:
+            dlg.close()
+            QApplication.processEvents()
+
+    @staticmethod
+    def _read_image_ref(ref):
+        """读取图片字节而不关闭其文件对象"""
+        try:
+            if isinstance(ref, io.BytesIO):
+                return ref.getvalue()
+            ref.seek(0)
+            data = ref.read()
+            ref.seek(0)
+            return data
+        except Exception:
+            return None
+
+    def _snapshot_template_images(self):
+        """记录模板内嵌图片字节，供保存前重建 ref。
+        openpyxl 保存图片后会 close 掉 BytesIO ref，第二次保存会报
+        'I/O operation on closed file'，因此保存前需用快照重建。"""
+        for name in self.template_wb.sheetnames:
+            for img in self.template_wb[name]._images:
+                img._saved_bytes = self._read_image_ref(img.ref)
+
+    def _refresh_image_refs(self):
+        """保存前用字节快照重建所有图片 ref"""
+        for name in self.template_wb.sheetnames:
+            for img in self.template_wb[name]._images:
+                data = getattr(img, '_saved_bytes', None)
+                if data:
+                    img.ref = io.BytesIO(data)
 
     # ==================== Sheet渲染 ====================
     def on_sheet_clicked(self, item):
         self.current_sheet_name = item.text()
         self.display_sheet(self.template_wb[self.current_sheet_name])
         self.refresh_mapping_list()
+
+    def _cell_fill_color(self, cell, wb):
+        """解析单元格填充色；无填充/无法解析返回 None（避免默认黑色误渲染）"""
+        fill = cell.fill
+        if not fill or not fill.patternType:
+            return None
+        return self._resolve_color(fill.fgColor, wb)
+
+    def _cell_font_color(self, cell, wb):
+        """解析单元格字体色。
+        Excel/WPS 把“自动”文本色序列化为 theme=0/1、indexed=8/9/64/65，
+        实际显示时按背景亮度自适应：深底显示白字、浅底/无底显示黑字，
+        因此这里单独处理；显式 rgb 色则原样使用。未设置颜色等同自动色。"""
+        color = cell.font.color if cell.font else None
+        is_auto = color is None
+        if color is not None:
+            ctype = getattr(color, 'type', None)
+            try:
+                if ctype == 'theme':
+                    is_auto = color.theme in (0, 1)
+                elif ctype == 'indexed':
+                    # 8=自动文字(黑), 9=自动背景(白), 64/65=自动前景/背景
+                    is_auto = color.indexed in (8, 9, 64, 65)
+                elif ctype == 'auto':
+                    is_auto = True
+            except Exception:
+                pass
+        if is_auto:
+            bg = self._cell_fill_color(cell, wb)
+            if bg is not None and self._luminance(bg) < 0.5:
+                return QColor("#FFFFFF")
+            return QColor("#000000")
+        return self._resolve_color(color, wb)
+
+    @staticmethod
+    def _luminance(qcolor):
+        """按人眼感知亮度计算颜色亮度（0~1）"""
+        return (0.299 * qcolor.red() + 0.587 * qcolor.green()
+                + 0.114 * qcolor.blue()) / 255.0
+
+    @staticmethod
+    def _apply_tint(hexcolor, tint):
+        """对主题色应用 tint（OOXML 规范）：
+        负值向黑加深、正值向白变浅。"""
+        if not tint:
+            return hexcolor
+        h = hexcolor.lstrip('#')
+        try:
+            r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+        except (ValueError, IndexError):
+            return hexcolor
+        if tint < 0:
+            factor = 1.0 + tint
+            r, g, b = r * factor, g * factor, b * factor
+        else:
+            r = r * (1.0 - tint) + 255.0 * tint
+            g = g * (1.0 - tint) + 255.0 * tint
+            b = b * (1.0 - tint) + 255.0 * tint
+        return "#%02X%02X%02X" % (
+            max(0, min(255, int(round(r)))),
+            max(0, min(255, int(round(g)))),
+            max(0, min(255, int(round(b)))),
+        )
+
+    def _resolve_color(self, color, wb):
+        """把 openpyxl 颜色对象解析为 QColor；rgb/indexed/theme 三类均支持"""
+        if color is None:
+            return None
+        ctype = getattr(color, 'type', None)
+        try:
+            if ctype == 'rgb':
+                rgb = color.rgb
+                if isinstance(rgb, str) and len(rgb) >= 6:
+                    qc = QColor(f"#{rgb[-6:]}")
+                    return qc if qc.isValid() else None
+            elif ctype == 'indexed':
+                idx = color.indexed
+                if isinstance(idx, int) and 0 <= idx < len(COLOR_INDEX):
+                    entry = COLOR_INDEX[idx]
+                    if entry:
+                        qc = QColor(f"#{entry[-6:]}")
+                        return qc if qc.isValid() else None
+            elif ctype == 'theme':
+                hexval = self._theme_color(wb, color.theme)
+                if hexval:
+                    tint = getattr(color, 'tint', None)
+                    qc = QColor(self._apply_tint(hexval, tint) if tint else hexval)
+                    return qc if qc.isValid() else None
+        except Exception:
+            pass
+        return None
+
+    def _theme_color(self, wb, idx):
+        """按主题色索引返回颜色（0=dk1,1=lt1,2=dk2,3=lt2,4-9=accent1-6,...）"""
+        if self._theme_owner is not wb:
+            self._theme_owner = wb
+            self._theme_map = self._parse_theme_colors(wb)
+        return self._theme_map.get(idx)
+
+    @staticmethod
+    def _parse_theme_colors(wb):
+        """解析工作簿主题 XML 中的 clrScheme 颜色"""
+        theme_bytes = getattr(wb, 'loaded_theme', None)
+        if not theme_bytes:
+            return {}
+        ns = {'a': 'http://schemas.openxmlformats.org/drawingml/2006/main'}
+        try:
+            root = ET.fromstring(theme_bytes)
+            scheme = root.find('.//a:clrScheme', ns)
+            if scheme is None:
+                return {}
+            order = ['dk1', 'lt1', 'dk2', 'lt2',
+                     'accent1', 'accent2', 'accent3', 'accent4', 'accent5', 'accent6',
+                     'hlink', 'folHlink']
+            result = {}
+            for i, name in enumerate(order):
+                el = scheme.find(f'a:{name}', ns)
+                if el is None:
+                    continue
+                srgb = el.find('a:srgbClr', ns)
+                if srgb is not None and 'val' in srgb.attrib:
+                    result[i] = f"#{srgb.attrib['val']}"
+                    continue
+                sysclr = el.find('a:sysClr', ns)
+                if sysclr is not None and 'lastClr' in sysclr.attrib:
+                    result[i] = f"#{sysclr.attrib['lastClr']}"
+            return result
+        except Exception:
+            return {}
 
     def display_sheet(self, ws):
         self.table.clear()
@@ -862,9 +470,17 @@ class MainWindow(QMainWindow):
                 span_cols = min(max_col, max_cols) - min_col + 1
                 self.table.setSpan(min_row-1, min_col-1, span_rows, span_cols)
 
+            wb = ws.parent
             for row_idx, row in enumerate(ws.iter_rows(min_row=1, max_row=max_rows, max_col=max_cols), start=1):
                 for col_idx, cell in enumerate(row, start=1):
                     if cell.value is None:
+                        # 空单元格只要渲染填充色（字体色无意义），无填充则跳过
+                        bg = self._cell_fill_color(cell, wb)
+                        if bg is None:
+                            continue
+                        item = QTableWidgetItem("")
+                        item.setBackground(bg)
+                        self.table.setItem(row_idx - 1, col_idx - 1, item)
                         continue
                     item = QTableWidgetItem(str(cell.value))
                     if cell.font:
@@ -875,17 +491,12 @@ class MainWindow(QMainWindow):
                             font.setPointSize(int(size))
                         font.setBold(cell.font.bold)
                         item.setFont(font)
-                    if cell.fill and cell.fill.fgColor and cell.fill.fgColor.rgb:
-                        raw = cell.fill.fgColor.rgb
-                        try:
-                            rgb = str(raw) if not isinstance(raw, str) else raw
-                            if len(rgb) == 8 and rgb.startswith('00'):
-                                rgb = rgb[2:]
-                            color = QColor(f"#{rgb}")
-                            if color.isValid():
-                                item.setBackground(color)
-                        except:
-                            pass
+                    bg = self._cell_fill_color(cell, wb)
+                    if bg is not None:
+                        item.setBackground(bg)
+                    fg = self._cell_font_color(cell, wb)
+                    if fg is not None:
+                        item.setForeground(fg)
                     self.table.setItem(row_idx-1, col_idx-1, item)
         except Exception as e:
             QMessageBox.warning(self, "渲染警告", f"表格渲染出现异常：{e}")
@@ -894,50 +505,117 @@ class MainWindow(QMainWindow):
 
     def _apply_uniform_sizes(self, ws, max_cols, max_rows):
         for col in range(1, max_cols + 1):
-            letter = get_column_letter(col)
-            if letter in ws.column_dimensions and ws.column_dimensions[letter].width:
-                width = int(ws.column_dimensions[letter].width * COL_WIDTH_PX_PER_CHAR)
-            else:
-                width = DEFAULT_COL_WIDTH_PX
+            width_chars = self._column_width_chars(ws, col)
+            width = int(width_chars * COL_WIDTH_PX_PER_CHAR)
             self.table.setColumnWidth(col - 1, width)
         for row in range(1, max_rows + 1):
             if row in ws.row_dimensions and ws.row_dimensions[row].height:
                 height = int(ws.row_dimensions[row].height * ROW_HEIGHT_PX_PER_PT)
             else:
-                height = DEFAULT_ROW_HEIGHT_PX
+                default_pts = ws.sheet_format.defaultRowHeight or DEFAULT_ROW_HEIGHT_PTS
+                height = int(default_pts * ROW_HEIGHT_PX_PER_PT)
             self.table.setRowHeight(row - 1, height)
+
+    @staticmethod
+    def _column_width_chars(ws, col_idx):
+        """解析某列宽度（字符数），兼容 openpyxl 不展开的区间列定义。
+        Excel 常写成 <col min="3" max="13" width="33"/>，openpyxl 只保留
+        首列索引，其余列查不到，需要遍历全部维度按 min/max 区间匹配。
+        未定义列退回 sheet 默认列宽。"""
+        letter = get_column_letter(col_idx)
+        if letter in ws.column_dimensions:
+            dim = ws.column_dimensions[letter]
+            if dim.width:
+                return dim.width
+        for dim in ws.column_dimensions.values():
+            lo = getattr(dim, 'min', None) or 0
+            hi = getattr(dim, 'max', None) or lo
+            if lo <= col_idx <= hi and dim.width:
+                return dim.width
+        return ws.sheet_format.defaultColWidth or DEFAULT_COL_WIDTH_CHARS
 
     # ==================== 右键菜单 ====================
     def show_context_menu(self, pos):
-        indexes = self.table.selectedIndexes()
-        if not indexes:
-            return
-        top = min(idx.row() for idx in indexes) + 1
-        left = min(idx.column() for idx in indexes) + 1
-        bottom = max(idx.row() for idx in indexes) + 1
-        right = max(idx.column() for idx in indexes) + 1
-        self.current_selection = (top, left, bottom, right)
-
         menu = QMenu()
-        info_action = QAction(
-            f"选中区域: {get_column_letter(left)}{top}:{get_column_letter(right)}{bottom}  ({bottom-top+1}行×{right-left+1}列)",
-            self
-        )
-        info_action.setEnabled(False)
-        menu.addAction(info_action)
-        menu.addSeparator()
-        menu.addAction(QAction("设为数据填充区", self, triggered=self.add_data_mapping))
-        menu.addAction(QAction("设为图片区域", self, triggered=self.add_image_mapping))
-        menu.addAction(QAction("设为归档区域（右移）", self, triggered=self.add_archive_mapping))
-        menu.addAction(QAction("设为JMP数据区", self, triggered=self.add_jmp_mapping))
+
+        # 右键单元格 -> 修改内容（可作用于空白单元格，用于新增内容）
+        row = self.table.rowAt(pos.y()) + 1
+        col = self.table.columnAt(pos.x()) + 1
+        if 1 <= row <= self.table.rowCount() and 1 <= col <= self.table.columnCount():
+            ws = self.template_wb[self.current_sheet_name]
+            cell_ref = f"{get_column_letter(col)}{row}"
+            menu.addAction(QAction(f"修改单元格内容（{cell_ref}）", self,
+                                   triggered=lambda: self.edit_cell_value(ws, row, col)))
+            menu.addSeparator()
+
+        indexes = self.table.selectedIndexes()
+        if indexes:
+            top = min(idx.row() for idx in indexes) + 1
+            left = min(idx.column() for idx in indexes) + 1
+            bottom = max(idx.row() for idx in indexes) + 1
+            right = max(idx.column() for idx in indexes) + 1
+            self.current_selection = (top, left, bottom, right)
+            info_action = QAction(
+                f"选中区域: {get_column_letter(left)}{top}:{get_column_letter(right)}{bottom}  ({bottom-top+1}行×{right-left+1}列)",
+                self
+            )
+            info_action.setEnabled(False)
+            menu.addAction(info_action)
+            menu.addSeparator()
+            menu.addAction(QAction("设为数据填充区", self, triggered=self.add_data_mapping))
+            menu.addAction(QAction("设为图片区域", self, triggered=self.add_image_mapping))
+            menu.addAction(QAction("设为归档区域（右移）", self, triggered=self.add_archive_mapping))
+            menu.addAction(QAction("设为JMP数据区", self, triggered=self.add_jmp_mapping))
+        if self.template_wb and self._version_header_cells(
+                self.template_wb[self.current_sheet_name]):
+            menu.addSeparator()
+            menu.addAction(QAction("查找版本号…", self, triggered=self.find_version_numbers))
+
+        if not menu.actions():
+            return
         menu.exec_(self.table.viewport().mapToGlobal(pos))
+
+    def edit_cell_value(self, ws, row, col):
+        """右键修改单元格内容，同步到模板工作簿（输出报告时生效）"""
+        item = self.table.item(row - 1, col - 1)
+        current = item.text() if item else ""
+        new_text, ok = QInputDialog.getText(
+            self, "修改单元格内容",
+            f"单元格 {get_column_letter(col)}{row} 的新内容（留空=清空，=开头=公式）：",
+            QLineEdit.Normal, current)
+        if not ok:
+            return
+        value = self._parse_cell_input(new_text)
+        ws.cell(row=row, column=col).value = value
+        self.cell_edits.append([self.current_sheet_name, row, col, value])
+        if item is None:
+            item = QTableWidgetItem()
+            self.table.setItem(row - 1, col - 1, item)
+        item.setText("" if value is None else str(value))
+
+    @staticmethod
+    def _parse_cell_input(text):
+        """把输入文本转为单元格值：数字->数值，=开头->公式，空->None，其余->文本"""
+        text = text.strip()
+        if text == "":
+            return None
+        if text.startswith("="):
+            return text
+        try:
+            return int(text)
+        except ValueError:
+            pass
+        try:
+            return float(text)
+        except ValueError:
+            return text
 
     # ==================== 映射添加 ====================
     def add_data_mapping(self):
         if not self.current_selection or not self.source_wb:
             QMessageBox.warning(self, "提示", "请先打开数据源文件并选中目标区域")
             return
-        dlg = SourceSelectDialog(self.source_wb, self)
+        dlg = SourceSelectDialog(self.source_wb, self, default_sheet=self.current_sheet_name)
         if dlg.exec_():
             src_sheet, src_range = dlg.get_selection()
             if not src_range:
@@ -948,6 +626,27 @@ class MainWindow(QMainWindow):
             if not trans_dlg.exec_():
                 return
             trans_type, trans_expr = trans_dlg.get_transform()
+
+            if trans_type == 'custom' and trans_expr.strip():
+                err = _check_transform_expr(trans_expr.strip())
+                if err:
+                    QMessageBox.warning(self, "表达式无效",
+                        f"自定义表达式无法安全解析：{trans_expr}\n{err}\n\n"
+                        "支持：x 与四则运算、比较、abs/round/min/max/int/float/str/len/sum。")
+                    return
+
+            # 防止数据填充目标与归档区块重叠（归档以磁盘原始数据为基准，会覆盖填充结果）
+            for m in self.mappings:
+                if (m.get('target_sheet') != self.current_sheet_name
+                        or m.get('type') != 'archive_shift_right'):
+                    continue
+                if self._archive_blocks_overlap(self.current_selection, m['block_range']):
+                    QMessageBox.warning(self, "区域冲突",
+                        f"数据填充区域与归档区块重叠，无法添加：\n"
+                        f"填充区域：{self._block_range_str(self.current_selection)}\n"
+                        f"归档区块：{self._block_range_str(m['block_range'])}\n\n"
+                        "归档会以磁盘原始数据为基准移位，重叠的填充结果会被覆盖。")
+                    return
 
             self.mappings.append({
                 'type': 'data',
@@ -965,18 +664,44 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "提示", "请先在模板中选中目标区域")
             return
 
-        dlg = ImageSetupDialog(self)
+        t_min_row, t_min_col, _, _ = self.current_selection
+        ws = self.template_wb[self.current_sheet_name]
+        default_w, default_h = self._cell_default_size(ws, t_min_row, t_min_col)
+        dlg = ImageSetupDialog(self, default_col_width=default_w,
+                               default_row_height=default_h)
         if not dlg.exec_():
             return
         col_width_chars, row_height_pts, rotation, w_scale, h_scale = dlg.get_values()
 
-        t_min_row, t_min_col, t_max_row, t_max_col = self.current_selection
+        _, _, t_max_row, t_max_col = self.current_selection
         rows = t_max_row - t_min_row + 1
         cols = t_max_col - t_min_col + 1
         if rows * cols == 1:
             self._add_single_image_mapping(col_width_chars, row_height_pts, rotation, w_scale, h_scale)
         else:
             self._add_batch_image_mapping(rows, cols, col_width_chars, row_height_pts, rotation, w_scale, h_scale)
+
+    def _cell_default_size(self, ws, row, col):
+        """锚点单元格（或所在合并区域）的默认图片尺寸：列宽(字符)、行高(磅)。
+        合并单元格按整个合并区域求和，未合并则取单格大小。"""
+        col_span = row_span = 1
+        for mr in ws.merged_cells.ranges:
+            m_min_col, m_min_row, m_max_col, m_max_row = range_boundaries(str(mr))
+            if m_min_row <= row <= m_max_row and m_min_col <= col <= m_max_col:
+                col_span = m_max_col - m_min_col + 1
+                row_span = m_max_row - m_min_row + 1
+                break
+        width_chars = sum(
+            self._column_width_chars(ws, c)
+            for c in range(col, col + col_span)
+        )
+        height_pts = 0.0
+        for r in range(row, row + row_span):
+            if r in ws.row_dimensions and ws.row_dimensions[r].height:
+                height_pts += ws.row_dimensions[r].height
+            else:
+                height_pts += ws.sheet_format.defaultRowHeight or DEFAULT_ROW_HEIGHT_PTS
+        return round(width_chars, 1), round(height_pts, 1)
 
     def _add_single_image_mapping(self, col_width_chars, row_height_pts, rotation, w_scale, h_scale):
         t_row, t_col, _, _ = self.current_selection
@@ -1023,7 +748,7 @@ class MainWindow(QMainWindow):
                     self.refresh_mapping_list()
             return
 
-        dlg = InternalImageSelectDialog(self.cached_images, self)
+        dlg = InternalImageSelectDialog(self.cached_images, self, default_sheet=self.current_sheet_name)
         if dlg.exec_():
             selected = dlg.get_selected_images()
             if selected:
@@ -1033,6 +758,9 @@ class MainWindow(QMainWindow):
                     'target_sheet': self.current_sheet_name,
                     'anchor_cell': anchor,
                     'image_bytes': img_info[3],
+                    'image_ref': [img_info[0], img_info[1]],
+                    'image_src_sheet': img_info[0],
+                    'image_src_pos': img_info[2],
                     'orig_width': img_info[4],
                     'orig_height': img_info[5],
                     'col_width_chars': col_width_chars,
@@ -1051,7 +779,8 @@ class MainWindow(QMainWindow):
         if not self.cached_images:
             QMessageBox.warning(self, "提示", "数据源中没有图片，无法批量添加")
             return
-        dlg = BatchImageDialog(self.cached_images, rows, cols, self)
+        dlg = BatchImageDialog(self.cached_images, rows, cols, self,
+                               default_sheet=self.current_sheet_name)
         if dlg.exec_() != QDialog.Accepted:
             return
         images = dlg.get_image_sequence()
@@ -1079,28 +808,127 @@ class MainWindow(QMainWindow):
                     base_mapping['image_path'] = img_data
                 else:
                     base_mapping['image_bytes'] = img_data[3]
+                    base_mapping['image_ref'] = [img_data[0], img_data[1]]
+                    base_mapping['image_src_sheet'] = img_data[0]
+                    base_mapping['image_src_pos'] = img_data[2]
                     base_mapping['orig_width'] = img_data[4]
                     base_mapping['orig_height'] = img_data[5]
                 self.mappings.append(base_mapping)
         self.refresh_mapping_list()
 
+    # ==================== 版本号查找 ====================
+    VERSION_HEADERS = {
+        'process_control': 'Process control rev.',
+        'ers': 'ERS rev.',
+        'vsr': 'VSR rev.',
+        'mco': 'MCO rev.',
+    }
+
+    def _version_header_cells(self, ws):
+        """在当前表定位版本号表头及其下一行的值单元格"""
+        found = {}
+        for key, header in self.VERSION_HEADERS.items():
+            for row in ws.iter_rows():
+                for cell in row:
+                    if (isinstance(cell.value, str)
+                            and cell.value.strip().lower() == header.lower()):
+                        found[key] = (cell.row + 1, cell.column)
+                        break
+                if key in found:
+                    break
+        return found
+
+    def _suggest_version_files(self):
+        """从模板所在目录自动推荐 ERS/VSR/MCO 档案。
+        只有 CLO 专案推荐 099-55402 系 ERS，其他专案优先推荐 BUF 模式。"""
+        base = os.path.dirname(self.template_path) if self.template_path else ""
+        keyword = 'BUF'
+        if self.template_path:
+            m = re.match(r'^([A-Za-z]+)', os.path.basename(self.template_path))
+            if m and m.group(1).upper() == 'CLO':
+                keyword = 'CLO'
+        suggestions = suggest_files(base, keyword)
+        suggestions['process_control'] = suggestions.get('ers')
+        return suggestions
+
+    def find_version_numbers(self):
+        ws = self.template_wb[self.current_sheet_name]
+        header_cells = self._version_header_cells(ws)
+        if not header_cells:
+            QMessageBox.information(self, "提示", "当前表未找到版本号字段（Process control/ERS/VSR/MCO rev.）")
+            return
+        keyword = 'BUF'
+        if self.template_path:
+            m = re.match(r'^([A-Za-z]+)', os.path.basename(self.template_path))
+            if m and m.group(1).upper() == 'CLO':
+                keyword = 'CLO'
+        dlg = VersionFinderDialog(
+            self, suggestions=self._suggest_version_files(),
+            folder_keyword=keyword)
+        if dlg.exec_() != QDialog.Accepted:
+            return
+        results = dlg.get_results()
+        filled = 0
+        skipped = []
+        for key, (path, value) in results.items():
+            if key not in header_cells:
+                skipped.append(key)
+                continue
+            if value is None:
+                skipped.append(key)
+                continue
+            if key == 'process_control':
+                try:
+                    value = float(value) if re.match(r'^\d+\.?\d*$', value) else value
+                except ValueError:
+                    pass
+            else:
+                try:
+                    value = int(float(value))
+                except ValueError:
+                    pass
+            row, col = header_cells[key]
+            ws.cell(row=row, column=col).value = value
+            self.cell_edits.append([self.current_sheet_name, row, col, value])
+            filled += 1
+        self.display_sheet(ws)
+        if skipped:
+            QMessageBox.warning(
+                self, "部分字段未更新",
+                f"以下字段匹配失败，已跳过更新：\n{', '.join(skipped)}\n\n"
+                "请在输出报告后，在报告中手动修改这些单元格。")
+        else:
+            QMessageBox.information(self, "完成", f"已写入 {filled} 个版本号字段")
+
     def add_archive_mapping(self):
-        if not self.current_selection or not self.source_wb:
-            QMessageBox.warning(self, "提示", "请先打开数据源文件并选中归档区域的首列")
+        if not self.current_selection:
+            QMessageBox.warning(self, "提示", "请先选中归档区域的首列")
             return
         t_min_row, t_min_col, t_max_row, _ = self.current_selection
         ws = self.template_wb[self.current_sheet_name]
 
-        dlg = ArchiveConfigDialog(self.source_wb, template_range=(t_min_row, t_min_col, t_max_row, t_min_col), parent=self)
+        dlg = ArchiveConfigDialog(template_range=(t_min_row, t_min_col, t_max_row, t_min_col), parent=self)
         if dlg.exec_():
-            header_rows, headers, src_sheet, src_range = dlg.get_selection()
-            if not src_range:
-                QMessageBox.warning(self, "提示", "源数据区域不能为空")
+            header_rows, headers, source_col = dlg.get_selection()
+            if not source_col:
+                QMessageBox.warning(self, "提示", "请填写新数据的来源列（如 J）")
+                return
+            try:
+                column_index_from_string(source_col)
+            except ValueError:
+                QMessageBox.warning(self, "提示", f"来源列无效：{source_col}")
                 return
 
-            max_col = ws.max_column
+            # 先按实际内容收缩最大列：跳过只设格式、没有内容的远距离单元格，
+            # 避免扫描范围被 max_column 撑大
+            content_max_col = max(
+                (col for (row, col), cell in ws._cells.items() if cell.value is not None),
+                default=0,
+            )
+            max_col = min(ws.max_column, content_max_col)
             right_col = t_min_col
-            for col in range(t_min_col, min(t_min_col + 50, max_col + 1)):
+            # 只扫表头行：从锚定列向右，找到最后一个表头有内容的列（无列数上限）
+            for col in range(t_min_col, max_col + 1):
                 has_value = False
                 for r in range(t_min_row, t_min_row + header_rows):
                     cell = ws.cell(row=r, column=col)
@@ -1120,15 +948,42 @@ class MainWindow(QMainWindow):
             if reply != QMessageBox.Yes:
                 return
 
-            block_rows = t_max_row - t_min_row + 1
-            data_rows = block_rows - header_rows
-            s_min_col, s_min_row, s_max_col, s_max_row = range_boundaries(src_range)
-            src_rows = s_max_row - s_min_row + 1
-            if src_rows != data_rows:
-                QMessageBox.warning(self, "行数不匹配",
-                    f"源数据区域需选择 {data_rows} 行，当前选择了 {src_rows} 行")
-                return
-            # 表头内容已经由输入框保证数量一致，无需检查
+            # 完全相同的归档映射已存在时不重复添加（避免操作重复触发）
+            for m in self.mappings:
+                if (m.get('target_sheet') == self.current_sheet_name
+                        and m.get('type') == 'archive_shift_right'
+                        and m.get('block_range') == full_block):
+                    QMessageBox.information(self, "提示",
+                        "该区块已存在相同的归档映射，无需重复添加。")
+                    return
+
+            # 防止多个归档区块重叠：重叠区块会互相覆盖数据（归档以磁盘原始数据为基准），
+            # 直接拒绝添加并提示用户调整范围
+            for m in self.mappings:
+                if (m.get('target_sheet') != self.current_sheet_name
+                        or m.get('type') != 'archive_shift_right'):
+                    continue
+                if self._archive_blocks_overlap(full_block, m['block_range']):
+                    QMessageBox.warning(
+                        self, "归档区域冲突",
+                        f"该归档区块与已有归档映射重叠，无法添加：\n"
+                        f"当前区块：{block_str}\n"
+                        f"已有区块：{self._block_range_str(m['block_range'])}\n\n"
+                        "归档区块之间必须互不重叠（行、列区间不能同时相交）。")
+                    return
+
+            # 防止归档区块与已有数据填充区域重叠（同上原因）
+            for m in self.mappings:
+                if (m.get('target_sheet') != self.current_sheet_name
+                        or m.get('type') != 'data'):
+                    continue
+                if self._archive_blocks_overlap(full_block, m['target_range']):
+                    QMessageBox.warning(self, "区域冲突",
+                        f"归档区块与已有数据填充区域重叠，无法添加：\n"
+                        f"归档区块：{block_str}\n"
+                        f"填充区域：{self._block_range_str(m['target_range'])}\n\n"
+                        "归档会以磁盘原始数据为基准移位，重叠的填充结果会被覆盖。")
+                    return
 
             self.mappings.append({
                 'type': 'archive_shift_right',
@@ -1136,8 +991,7 @@ class MainWindow(QMainWindow):
                 'block_range': full_block,
                 'header_rows': header_rows,
                 'new_headers': headers,
-                'source_sheet': src_sheet,
-                'source_range': src_range
+                'source_col': source_col
             })
             self.refresh_mapping_list()
 
@@ -1170,10 +1024,12 @@ class MainWindow(QMainWindow):
     # ==================== 映射列表刷新 ====================
     def refresh_mapping_list(self):
         self.mapping_list.clear()
-        for i, m in enumerate(self.mappings):
+        shown = 0
+        for m in self._dedupe_mappings(self.mappings):
             if m.get('target_sheet') != self.current_sheet_name:
                 continue
-            desc = f"{i+1}. "
+            shown += 1
+            desc = f"{shown}. "
             if m['type'] == 'data':
                 trans = m.get('transform', 'none')
                 trans_str = f" [转换:{trans}]" if trans != 'none' else ""
@@ -1181,11 +1037,57 @@ class MainWindow(QMainWindow):
             elif m['type'] == 'image':
                 desc += f"图片: 锚点{m['anchor_cell']} (列宽{m.get('col_width_chars','?')} 行高{m.get('row_height_pts','?')} 旋转{m.get('rotation',0)}° 缩放{m.get('width_scale',1.0)}x{m.get('height_scale',1.0)})"
             elif m['type'] == 'archive_shift_right':
-                desc += f"归档: {m['block_range']} 新表头\"{m['new_headers']}\""
+                src_col = m.get('source_col', '?')
+                desc += f"归档: {m['block_range']} <- {src_col}列 新表头\"{m['new_headers']}\""
             elif m['type'] == 'jmp':
                 headers_str = ','.join(m['header_cols'])
                 desc += f"JMP: 锚点{m['anchor_cell']} <- {m['source_sheet']}!{m['source_range']} (表头:{headers_str} 拼接:{m['merge_columns']})"
-            self.mapping_list.addItem(desc)
+            item = QListWidgetItem(desc)
+            item.setData(Qt.UserRole, next(i for i, x in enumerate(self.mappings) if x is m))
+            self.mapping_list.addItem(item)
+
+    # ==================== 映射列表右键操作 ====================
+    def show_mapping_context_menu(self, pos):
+        item = self.mapping_list.itemAt(pos)
+        if item is None:
+            return
+        mapping_idx = item.data(Qt.UserRole)
+        menu = QMenu()
+        menu.addAction(QAction("删除该映射", self, triggered=lambda: self.delete_mapping(mapping_idx)))
+        menu.addSeparator()
+        menu.addAction(QAction(f"清空本Sheet“{self.current_sheet_name}”全部映射", self,
+                               triggered=self.clear_sheet_mappings))
+        menu.addAction(QAction("清空全部映射", self, triggered=self.clear_all_mappings))
+        menu.exec_(self.mapping_list.viewport().mapToGlobal(pos))
+
+    def delete_mapping(self, mapping_idx):
+        """按面板条目对应的索引删除映射"""
+        if mapping_idx is not None and 0 <= mapping_idx < len(self.mappings):
+            del self.mappings[mapping_idx]
+            self.refresh_mapping_list()
+
+    def clear_sheet_mappings(self):
+        count = sum(1 for m in self.mappings if m.get('target_sheet') == self.current_sheet_name)
+        if count == 0:
+            return
+        reply = QMessageBox.question(self, "确认清空",
+            f"确定删除当前Sheet“{self.current_sheet_name}”的全部 {count} 条映射？",
+            QMessageBox.Yes | QMessageBox.No)
+        if reply != QMessageBox.Yes:
+            return
+        self.mappings = [m for m in self.mappings if m.get('target_sheet') != self.current_sheet_name]
+        self.refresh_mapping_list()
+
+    def clear_all_mappings(self):
+        if not self.mappings:
+            return
+        reply = QMessageBox.question(self, "确认清空",
+            f"确定删除全部 {len(self.mappings)} 条映射？",
+            QMessageBox.Yes | QMessageBox.No)
+        if reply != QMessageBox.Yes:
+            return
+        self.mappings = []
+        self.refresh_mapping_list()
 
     # ==================== 确认映射 ====================
     def confirm_mapping(self):
@@ -1199,6 +1101,128 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "确认", f"已确认当前Sheet“{self.current_sheet_name}”的 {len(current_mappings)} 条映射，待输出报告时统一执行。")
 
     # ==================== 输出报告 ====================
+    def _apply_cell_edits(self, ws, sheet_name):
+        """把单独的单元格更新（右键修改/版本号查找）重放到工作表。
+        必须在归档移位之后执行：归档会以磁盘数据覆盖区域，重放可保证
+        用户手动更新落在最终版式上；若编辑单元格位于归档区块内，
+        则随区块右移一格（保持编辑与数据一起移动）。"""
+        edits = [e for e in self.cell_edits if e[0] == sheet_name]
+        if not edits:
+            return
+        archive_blocks = [
+            m['block_range'] for m in self._dedupe_mappings(self.mappings)
+            if m.get('target_sheet') == sheet_name
+            and m.get('type') == 'archive_shift_right']
+        for entry in edits:
+            row, col, value = entry[1], entry[2], entry[3]
+            for min_row, min_col, max_row, max_col in archive_blocks:
+                if min_row <= row <= max_row and min_col <= col <= max_col:
+                    col += 1
+            ws.cell(row=row, column=col).value = value
+
+    @staticmethod
+    def _first_date_header(ws):
+        """查找表中第一个 Date 表头（不同制程位置可能略有变化）"""
+        for row in ws.iter_rows():
+            for cell in row:
+                if isinstance(cell.value, str) and cell.value.strip().lower() == 'date':
+                    return cell
+        return None
+
+    @staticmethod
+    def _fill_report_date(ws):
+        """把 Summary 中 Date 表头右侧的单元格填充为报告当天日期"""
+        header = MainWindow._first_date_header(ws)
+        if header is None:
+            return
+        ws.cell(row=header.row, column=header.column + 1).value = datetime.datetime.now()
+
+    # Build Phase / Configuration / Event 从文件夹名称解析
+    BUILD_INFO_PATTERNS = {
+        # 用"非字母数字"作边界（下划线不算边界，文件名/文件夹名都能匹配）
+        'build_phase': re.compile(r'(?<![A-Za-z0-9])C\d+\.\d+(?![A-Za-z0-9])'),
+        'configuration': re.compile(r'(?<![A-Za-z0-9])C\d{4}(?![A-Za-z0-9])'),
+        'event': re.compile(r'(?<![A-Za-z0-9])(MBO|PBO)(?![A-Za-z0-9])', re.I),
+    }
+
+    @classmethod
+    def _parse_build_info_from_folder(cls, folder_name):
+        """从文件夹名称解析 Build Phase / Configuration / Event"""
+        info = {}
+        for key, pattern in cls.BUILD_INFO_PATTERNS.items():
+            m = pattern.search(folder_name)
+            if m:
+                info[key] = m.group(0).upper() if key == 'event' else m.group(0)
+        return info
+
+    @classmethod
+    def _parse_build_info_from_folders(cls, folder_names):
+        """按顺序在多个文件夹名称中查找，每项取第一个命中"""
+        info = {}
+        for folder_name in folder_names:
+            parsed = cls._parse_build_info_from_folder(folder_name)
+            for key in ('build_phase', 'configuration', 'event'):
+                if key not in info and parsed.get(key):
+                    info[key] = parsed[key]
+        return info
+
+    @staticmethod
+    def _find_build_info_value_cells(ws):
+        """定位 Build Phase/Configuration/Event 表头下一格的值单元格"""
+        targets = {}
+        for row in ws.iter_rows():
+            for cell in row:
+                if not isinstance(cell.value, str):
+                    continue
+                norm = re.sub(r'\s+', ' ', cell.value).strip().lower()
+                if norm == 'build phase':
+                    targets['build_phase'] = (cell.row + 1, cell.column)
+                elif norm == 'configuration':
+                    targets['configuration'] = (cell.row + 1, cell.column)
+                elif norm == 'event ( mbo /pbo )':
+                    targets['event'] = (cell.row + 1, cell.column)
+        return targets
+
+    @staticmethod
+    def _fill_build_info_from_folders(ws, folder_names):
+        """从文件夹名称（按顺序查找）填充 Build Phase/Configuration/Event。
+        返回未获取到的字段名列表（跳过更新，由用户手动填写）。"""
+        info = MainWindow._parse_build_info_from_folders(folder_names)
+        value_cells = MainWindow._find_build_info_value_cells(ws)
+        failures = []
+        for key, (row, col) in value_cells.items():
+            value = info.get(key)
+            if value:
+                ws.cell(row=row, column=col).value = value
+            else:
+                failures.append(key)
+        return failures
+
+    @classmethod
+    def _build_output_filename(cls, ws, template_path):
+        """沿用模板文件名格式，把 Configuration/Event 段更新为 Summary
+        中当前的值（文件名不含 Build Phase）；其余部分保留，
+        由用户在保存对话框里自行修改。"""
+        base_name = os.path.basename(template_path or '') or '报告'
+        if base_name.lower().endswith('.xlsx'):
+            base_name = base_name[:-5]
+        elif '.' in base_name:
+            base_name = base_name.rsplit('.', 1)[0]
+
+        values = {}
+        for key, (row, col) in cls._find_build_info_value_cells(ws).items():
+            v = ws.cell(row=row, column=col).value
+            if v is not None:
+                values[key] = str(v).strip()
+
+        name = base_name
+        if values.get('configuration'):
+            name = cls.BUILD_INFO_PATTERNS['configuration'].sub(
+                values['configuration'], name, count=1)
+        if values.get('event'):
+            name = cls.BUILD_INFO_PATTERNS['event'].sub(values['event'], name, count=1)
+        return name + '.xlsx'
+
     def output_report(self):
         if not self.template_wb:
             return
@@ -1212,27 +1236,131 @@ class MainWindow(QMainWindow):
         data_source_wb = openpyxl.load_workbook(self.source_path, data_only=True) if self.source_path else None
 
         failed_mappings = []
+        self._fill_warnings = []
+        build_info_failures = []
+        # 查找范围：从 IPQC 数据所在文件夹开始，找不到再往上一级
+        search_folder_names = []
+        base_dir = (os.path.dirname(self.source_path)
+                    if self.source_path else
+                    (os.path.dirname(self.template_path) if self.template_path else ''))
+        if base_dir:
+            search_folder_names.append(os.path.basename(base_dir) or base_dir)
+            parent_dir = os.path.dirname(base_dir)
+            if parent_dir:
+                search_folder_names.append(os.path.basename(parent_dir) or parent_dir)
+
+        # 预计算总映射数，用于进度条
+        total_mappings = sum(
+            len(self._dedupe_mappings(
+                [m for m in self.mappings if m.get('target_sheet') == sheet_name]))
+            for sheet_name in checked_sheets
+        )
+        prog = self._make_progress("正在处理中，请稍等！", total_mappings)
+        done = 0
+
         for sheet_name in checked_sheets:
             ws = self.template_wb[sheet_name]
             data_ws = data_template_wb[sheet_name]
-            data_src_ws = data_source_wb[sheet_name] if data_source_wb and sheet_name in data_source_wb.sheetnames else None
-            for mapping in [m for m in self.mappings if m.get('target_sheet') == sheet_name]:
+            # Summary：Date 表头右侧自动填充报告当天日期
+            if 'summary' in sheet_name.lower():
+                self._fill_report_date(ws)
+                for key in self._fill_build_info_from_folders(ws, search_folder_names):
+                    build_info_failures.append(f"{sheet_name}/{key}")
+            sheet_mappings = self._dedupe_mappings(
+                [m for m in self.mappings if m.get('target_sheet') == sheet_name])
+
+            # 输出前防御：归档区块重叠会互相覆盖，直接报错并跳过，避免生成错误报告
+            # （配置文件中加载进来的旧映射可能绕过添加时的冲突检查）
+            archive_mappings = [m for m in sheet_mappings if m.get('type') == 'archive_shift_right']
+            conflicted_ids = set()
+            for i in range(len(archive_mappings)):
+                for j in range(i + 1, len(archive_mappings)):
+                    if self._archive_blocks_overlap(archive_mappings[i]['block_range'],
+                                                    archive_mappings[j]['block_range']):
+                        conflicted_ids.add(id(archive_mappings[i]))
+                        conflicted_ids.add(id(archive_mappings[j]))
+                        failed_mappings.append(
+                            f"{sheet_name}/archive_shift_right: 归档区块重叠，已跳过："
+                            f"{self._block_range_str(archive_mappings[i]['block_range'])} 与 "
+                            f"{self._block_range_str(archive_mappings[j]['block_range'])}")
+
+            # 执行顺序：归档 → 数据/图片 → 单独单元格更新 → JMP（最后）
+            archive_mappings = [m for m in sheet_mappings
+                                if m.get('type') == 'archive_shift_right']
+            middle_mappings = [m for m in sheet_mappings
+                               if m.get('type') not in ('archive_shift_right', 'jmp')]
+            jmp_mappings = [m for m in sheet_mappings if m.get('type') == 'jmp']
+
+            def run_mapping(mapping):
+                nonlocal done
+                if id(mapping) in conflicted_ids:
+                    return
+                # 按映射自身的 source_sheet 解析数据源（此前误用目标Sheet名查找，
+                # 数据源存在同名Sheet时会静默读错表）
+                data_src_ws = self._resolve_data_src_ws(mapping, data_source_wb)
+                # JMP 的源表在模板文件内，取其数值版（data_only），不能用目标Sheet代替
+                jmp_src_ws = None
+                if mapping.get('type') == 'jmp':
+                    src_sheet = mapping.get('source_sheet')
+                    if src_sheet and src_sheet in data_template_wb.sheetnames:
+                        jmp_src_ws = data_template_wb[src_sheet]
                 try:
-                    self.execute_mapping(ws, mapping, data_ws, data_src_ws)
+                    self.execute_mapping(ws, mapping, data_ws, data_src_ws, jmp_src_ws)
                 except Exception as e:
                     failed_mappings.append(f"{sheet_name}/{mapping.get('type')}: {e}")
+                done += 1
+                self._update_progress(prog, done, total_mappings)
+
+            for mapping in archive_mappings + middle_mappings:
+                run_mapping(mapping)
+            # 归档与数据/图片之后，重放该表的单独单元格更新（右键修改/版本号）
+            self._apply_cell_edits(ws, sheet_name)
+            # JMP 最后执行
+            for mapping in jmp_mappings:
+                run_mapping(mapping)
+
+        self._close_progress(prog)
+
+        if build_info_failures:
+            QMessageBox.warning(
+                self, "部分字段未自动更新",
+                "以下字段无法从文件夹名称获取，已跳过更新"
+                f"（已查找：{' → '.join(search_folder_names) or '无'}）：\n"
+                + "\n".join(build_info_failures)
+                + "\n\n请在报告中手动修改这些单元格。")
+
+        if self._fill_warnings:
+            shown = self._fill_warnings[:20]
+            more = len(self._fill_warnings) - len(shown)
+            msg = "处理过程中发现以下警告，请检查后再确认报告：\n\n" + "\n".join(shown)
+            if more > 0:
+                msg += f"\n…另有 {more} 处"
+            QMessageBox.warning(self, "处理警告", msg)
 
         data_template_wb.close()
         if data_source_wb:
             data_source_wb.close()
 
-        save_path, _ = QFileDialog.getSaveFileName(self, "保存报告", "", "Excel文件 (*.xlsx)")
+        # 默认文件名：沿用模板格式，Configuration/Event 用 Summary 当前值
+        summary_sheet = next((s for s in checked_sheets if 'summary' in s.lower()), None)
+        default_name = ''
+        if summary_sheet:
+            default_name = self._build_output_filename(
+                self.template_wb[summary_sheet], self.template_path)
+        default_dir = os.path.dirname(self.template_path) if self.template_path else ''
+        default_path = os.path.join(default_dir, default_name) if default_dir else default_name
+        save_path, _ = QFileDialog.getSaveFileName(
+            self, "保存报告", default_path, "Excel文件 (*.xlsx)")
         if save_path:
+            save_prog = self._make_busy_progress("正在保存报告，请稍等…")
             try:
+                self._refresh_image_refs()
                 self.template_wb.save(save_path)
             except Exception as e:
+                self._close_progress(save_prog)
                 QMessageBox.critical(self, "保存失败", f"保存报告时出错：{e}")
                 return
+            self._close_progress(save_prog)
 
             self._image_streams.clear()
 
@@ -1243,232 +1371,6 @@ class MainWindow(QMainWindow):
             else:
                 QMessageBox.information(self, "完成", "报告已保存")
 
-    def execute_mapping(self, ws, mapping, data_ws, data_src_ws=None):
-        if mapping['type'] == 'data':
-            self.apply_data_mapping(ws, mapping, data_src_ws)
-        elif mapping['type'] == 'image':
-            self.apply_image_mapping(ws, mapping)
-        elif mapping['type'] == 'archive_shift_right':
-            self.apply_archive_shift_right(ws, mapping, data_ws, data_src_ws)
-        elif mapping['type'] == 'jmp':
-            self.apply_jmp_mapping(ws, mapping)
-
-    # ---------- 数据转换 ----------
-    def _apply_transform(self, value, mapping):
-        trans = mapping.get('transform', 'none')
-        if trans == 'none' or value is None:
-            return value
-        try:
-            if trans == 'div1000':
-                return float(value) / 1000.0
-            elif trans == 'strip_letters':
-                if isinstance(value, str):
-                    return re.sub(r'[a-zA-Z]+$', '', value)
-                return value
-            elif trans == 'custom':
-                expr = mapping.get('transform_expr', '')
-                if expr:
-                    return eval(expr, {"x": value, "__builtins__": {}})
-        except:
-            pass
-        return value
-
-    def apply_data_mapping(self, ws, mapping, data_src_ws=None):
-        t_min_row, t_min_col, t_max_row, t_max_col = mapping['target_range']
-        src_ws = data_src_ws if data_src_ws else self.source_wb[mapping['source_sheet']]
-        s_min_col, s_min_row, s_max_col, s_max_row = range_boundaries(mapping['source_range'])
-        for i in range(t_max_row - t_min_row + 1):
-            for j in range(t_max_col - t_min_col + 1):
-                src_row = s_min_row + i
-                src_col = s_min_col + j
-                if src_row <= s_max_row and src_col <= s_max_col:
-                    val = src_ws.cell(row=src_row, column=src_col).value
-                    val = self._apply_transform(val, mapping)
-                    ws.cell(row=t_min_row + i, column=t_min_col + j).value = val
-
-    def remove_images_at_anchor(self, ws, anchor):
-        to_remove = []
-        for img in ws._images:
-            if hasattr(img, 'anchor') and hasattr(img.anchor, '_from'):
-                r = img.anchor._from.row + 1
-                c = img.anchor._from.col + 1
-                if f"{get_column_letter(c)}{r}" == anchor:
-                    to_remove.append(img)
-        for img in to_remove:
-            ws._images.remove(img)
-
-    def _process_image_data(self, img_bytes, rotation, target_w, target_h):
-        pil_img = PILImage.open(io.BytesIO(img_bytes))
-        if rotation != 0:
-            pil_img = pil_img.rotate(-rotation, expand=True)
-        pil_img = pil_img.resize((target_w, target_h), PILImage.LANCZOS)
-        out_stream = io.BytesIO()
-        pil_img.save(out_stream, format='PNG')
-        out_stream.seek(0)
-        return out_stream
-
-    def apply_image_mapping(self, ws, mapping):
-        try:
-            anchor = mapping['anchor_cell']
-            col_width_chars = mapping.get('col_width_chars', 8.0)
-            row_height_pts = mapping.get('row_height_pts', 15.0)
-            rotation = mapping.get('rotation', 0.0)
-            w_scale = mapping.get('width_scale', 1.0)
-            h_scale = mapping.get('height_scale', 1.0)
-
-            target_width = int(col_width_chars * COL_WIDTH_PX_PER_CHAR * w_scale)
-            target_height = int(row_height_pts * ROW_HEIGHT_PX_PER_PT * h_scale)
-
-            if 'image_path' in mapping:
-                if not os.path.exists(mapping['image_path']):
-                    raise FileNotFoundError(f"图片文件不存在: {mapping['image_path']}")
-                with open(mapping['image_path'], 'rb') as f:
-                    img_bytes = f.read()
-                processed_stream = self._process_image_data(img_bytes, rotation, target_width, target_height)
-                self._image_streams.append(processed_stream)
-
-                self.remove_images_at_anchor(ws, anchor)
-                new_img = OpenpyxlImage(processed_stream)
-                new_img.anchor = anchor
-                ws.add_image(new_img)
-                return
-
-            if 'image_bytes' not in mapping:
-                raise RuntimeError("映射中缺少图片数据")
-            img_bytes = mapping['image_bytes']
-            processed_stream = self._process_image_data(img_bytes, rotation, target_width, target_height)
-            self._image_streams.append(processed_stream)
-
-            self.remove_images_at_anchor(ws, anchor)
-            new_img = OpenpyxlImage(processed_stream)
-            new_img.anchor = anchor
-            ws.add_image(new_img)
-
-        except Exception as e:
-            QMessageBox.warning(self, "图片处理错误", f"图片写入失败：{e}")
-
-    def apply_archive_shift_right(self, ws, mapping, data_ws, data_src_ws=None):
-        min_row, min_col, max_row, max_col = mapping['block_range']
-        header_rows = mapping.get('header_rows', 1)
-        new_headers = mapping.get('new_headers', [])
-        src_ws = data_src_ws if data_src_ws else self.source_wb[mapping['source_sheet']]
-        s_min_col, s_min_row, s_max_col, s_max_row = range_boundaries(mapping['source_range'])
-
-        merged_to_shift = []
-        for mr in ws.merged_cells.ranges:
-            m_min_col, m_min_row, m_max_col, m_max_row = range_boundaries(str(mr))
-            if (m_min_row >= min_row and m_max_row <= max_row and
-                m_min_col >= min_col and m_max_col <= max_col):
-                merged_to_shift.append(str(mr))
-        for mr in merged_to_shift:
-            ws.unmerge_cells(mr)
-
-        # 右移（纯数值）
-        for col in range(max_col, min_col - 1, -1):
-            for row in range(min_row, max_row + 1):
-                src_cell = data_ws.cell(row=row, column=col)
-                dst_cell = ws.cell(row=row, column=col + 1)
-                dst_cell.value = src_cell.value
-                self.copy_cell_style(ws.cell(row=row, column=col), dst_cell)
-
-        for row in range(min_row, max_row + 1):
-            ws.cell(row=row, column=min_col).value = None
-
-        for mr in merged_to_shift:
-            m_min_col, m_min_row, m_max_col, m_max_row = range_boundaries(mr)
-            ws.merge_cells(f"{get_column_letter(m_min_col+1)}{m_min_row}:{get_column_letter(m_max_col+1)}{m_max_row}")
-
-        # 填充新表头
-        for i in range(header_rows):
-            row_idx = min_row + i
-            cell = ws.cell(row=row_idx, column=min_col)
-            if i < len(new_headers):
-                cell.value = new_headers[i]
-            self.copy_cell_style(ws.cell(row=row_idx, column=min_col + 1), cell)
-
-        # 填充新数据
-        data_start_row = min_row + header_rows
-        for i in range(max_row - data_start_row + 1):
-            src_row = s_min_row + i
-            if src_row > s_max_row:
-                break
-            target_row = data_start_row + i
-            src_cell = src_ws.cell(row=src_row, column=s_min_col)
-            ws.cell(row=target_row, column=min_col).value = src_cell.value
-            self.copy_cell_style(ws.cell(row=target_row, column=min_col + 1),
-                                 ws.cell(row=target_row, column=min_col))
-
-    def apply_jmp_mapping(self, ws, mapping):
-        anchor = mapping['anchor_cell']
-        col_letter = ''.join(filter(str.isalpha, anchor))
-        row_num = int(''.join(filter(str.isdigit, anchor)))
-        start_row = row_num
-        start_col = column_index_from_string(col_letter)
-
-        headers = mapping['header_cols']  # 列表
-        src_sheet_name = mapping['source_sheet']
-        src_range = mapping['source_range']
-        merge = mapping['merge_columns']
-
-        src_ws = self.template_wb[src_sheet_name]
-        s_min_col, s_min_row, s_max_col, s_max_row = range_boundaries(src_range)
-
-        data_rows = s_max_row - s_min_row + 1
-        data_cols = s_max_col - s_min_col + 1
-
-        # 获取参考行样式（锚点上一行）
-        ref_row = start_row - 1
-        if ref_row < 1:
-            ref_row = start_row  # 如果锚点在第1行，则参考自身
-
-        if merge and data_cols > 1:
-            values = []
-            for r in range(s_min_row, s_max_row + 1):
-                for c in range(s_min_col, s_max_col + 1):
-                    val = src_ws.cell(row=r, column=c).value
-                    values.append(val)
-            row_count = len(values)
-            for row_offset in range(row_count):
-                current_row = start_row + row_offset
-                # 写入表头
-                for idx, header_text in enumerate(headers):
-                    cell = ws.cell(row=current_row, column=start_col + idx)
-                    cell.value = header_text
-                # 写入数据
-                val = values[row_offset]
-                ws.cell(row=current_row, column=start_col + len(headers), value=val)
-                # 复制格式（整行）
-                for col_idx in range(start_col, start_col + len(headers) + 1):
-                    ref_cell = ws.cell(row=ref_row, column=col_idx)
-                    target_cell = ws.cell(row=current_row, column=col_idx)
-                    self.copy_cell_style(ref_cell, target_cell)
-        else:
-            row_count = data_rows
-            target_data_cols = data_cols
-            for row_offset in range(row_count):
-                current_row = start_row + row_offset
-                # 写入表头
-                for idx, header_text in enumerate(headers):
-                    cell = ws.cell(row=current_row, column=start_col + idx)
-                    cell.value = header_text
-                # 写入数据
-                for c in range(target_data_cols):
-                    src_val = src_ws.cell(row=s_min_row + row_offset, column=s_min_col + c).value
-                    ws.cell(row=current_row, column=start_col + len(headers) + c, value=src_val)
-                # 复制格式
-                for col_idx in range(start_col, start_col + len(headers) + target_data_cols):
-                    ref_cell = ws.cell(row=ref_row, column=col_idx)
-                    target_cell = ws.cell(row=current_row, column=col_idx)
-                    self.copy_cell_style(ref_cell, target_cell)
-
-    @staticmethod
-    def copy_cell_style(src, dst):
-        if src.has_style:
-            dst.font = copy(src.font)
-            dst.border = copy(src.border)
-            dst.fill = copy(src.fill)
-            dst.number_format = src.number_format
-            dst.alignment = copy(src.alignment)
 
     # ==================== 配置保存 ====================
     def save_config(self):
@@ -1478,12 +1380,20 @@ class MainWindow(QMainWindow):
         clean_mappings = []
         for m in self.mappings:
             m_copy = m.copy()
-            if 'image_bytes' in m_copy:
-                m_copy['image_bytes'] = None
+            # 配置只记录映射路径（从哪里→到哪里），不保存内容本身
+            m_copy.pop('image_bytes', None)
             clean_mappings.append(m_copy)
 
         config = {'template_file': self.template_path, 'mappings': clean_mappings}
-        config_path = self.template_path.rsplit('.', 1)[0] + '_config.json'
+        default_dir = os.path.dirname(self.template_path) or ''
+        default_name = os.path.basename(self.template_path).rsplit('.', 1)[0] + '_config.json'
+        default_path = os.path.join(default_dir, default_name) if default_dir else default_name
+        config_path, _ = QFileDialog.getSaveFileName(
+            self, "保存配置", default_path, "配置文件 (*.json)")
+        if not config_path:
+            return
+        if not config_path.lower().endswith('.json'):
+            config_path += '.json'
         try:
             with open(config_path, 'w', encoding='utf-8') as f:
                 json.dump(config, f, ensure_ascii=False, indent=2)
@@ -1491,9 +1401,162 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "错误", f"配置保存失败：{e}")
 
+    def import_config(self):
+        if not self.template_wb:
+            QMessageBox.warning(self, "提示", "请先打开报告文件")
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self, "导入我的配置", "", "配置文件 (*.json);;所有文件 (*)")
+        if not path:
+            return
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+            mappings = config.get('mappings', [])
+            if not isinstance(mappings, list):
+                raise ValueError("配置中 mappings 格式不正确")
+            cfg_template = config.get('template_file')
+            if (cfg_template and self.template_path
+                    and os.path.basename(cfg_template) != os.path.basename(self.template_path)):
+                reply = QMessageBox.question(
+                    self, "确认导入",
+                    f"该配置来自模板：\n{os.path.basename(cfg_template)}\n"
+                    f"与当前报告：\n{os.path.basename(self.template_path)}\n"
+                    "不一致，仍要导入吗？",
+                    QMessageBox.Yes | QMessageBox.No)
+                if reply != QMessageBox.Yes:
+                    return
+            self.mappings = mappings
+            self.refresh_mapping_list()
+            QMessageBox.information(self, "完成", f"已导入 {len(mappings)} 条映射")
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"配置导入失败：{e}")
+
+
+# ==================== 用户ID验证 ====================
+class UserIdDialog(QDialog):
+    """欢迎界面之后、进入主界面之前的用户ID验证窗口"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("用户ID验证")
+        self.setFixedWidth(360)
+        self.user_id = None
+
+        layout = QVBoxLayout(self)
+        tip = QLabel("请输入自己的工号：")
+        layout.addWidget(tip)
+
+        self.edit = QLineEdit()
+        self.edit.setPlaceholderText("请输入工号")
+        self.edit.setMaxLength(32)
+        self.edit.returnPressed.connect(self.try_login)
+        layout.addWidget(self.edit)
+
+        self.error_label = QLabel("")
+        self.error_label.setStyleSheet("color: #b00020; font-weight: bold;")
+        self.error_label.setVisible(False)
+        layout.addWidget(self.error_label)
+
+        btn_layout = QHBoxLayout()
+        self.btn_ok = QPushButton("确定")
+        self.btn_ok.clicked.connect(self.try_login)
+        self.btn_cancel = QPushButton("退出")
+        self.btn_cancel.clicked.connect(self.reject)
+        btn_layout.addStretch()
+        btn_layout.addWidget(self.btn_ok)
+        btn_layout.addWidget(self.btn_cancel)
+        layout.addLayout(btn_layout)
+
+        self.edit.setFocus()
+
+    def try_login(self):
+        user_id = self.edit.text().strip().upper()
+        if not user_id:
+            self._show_unauthorized()
+            return
+        if user_id == ADMIN_USER_ID:
+            self._admin_flow()
+            return
+        if user_id in load_authorized_ids():
+            self.user_id = user_id
+            self.accept()
+            return
+        self._show_unauthorized()
+
+    def _show_unauthorized(self):
+        self.error_label.setText("您当前ID未授权！")
+        self.error_label.setVisible(True)
+        self.edit.selectAll()
+        self.edit.setFocus()
+
+    def _admin_flow(self):
+        """管理员流程：授权密码 → ID授权窗口 → 进入主界面"""
+        password, ok = QInputDialog.getText(
+            self, "管理员授权", "请输入授权密码：", QLineEdit.Password)
+        if not ok:
+            return
+        if password != ADMIN_AUTH_PASSWORD:
+            QMessageBox.warning(self, "密码错误", "授权密码错误！")
+            return
+        dlg = AuthorizeIdDialog(self)
+        dlg.exec_()
+        new_ids = dlg.get_new_ids()
+        if new_ids:
+            current = load_authorized_ids()
+            combined = list(dict.fromkeys(current + new_ids))
+            saved = save_authorized_ids(combined)
+            msg = f"已授权 {len(new_ids)} 个工号：\n" + ", ".join(new_ids)
+            if not saved:
+                msg += "\n（授权文件保存失败，本次运行内有效）"
+            QMessageBox.information(self, "授权完成", msg)
+        self.user_id = ADMIN_USER_ID
+        self.accept()
+
+    def get_user_id(self):
+        return self.user_id
+
+
+class AuthorizeIdDialog(QDialog):
+    """管理员授权窗口：批量输入需要授权的工号"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("ID授权")
+        self.setMinimumSize(460, 300)
+
+        layout = QVBoxLayout(self)
+        tip = QLabel(
+            "请输入需要授权的工号，多个工号可用空格、逗号、分号、斜杠等隔开：")
+        tip.setWordWrap(True)
+        layout.addWidget(tip)
+
+        self.text = QPlainTextEdit()
+        self.text.setPlaceholderText("例如：G1655895 G1659304; G1234567, G7654321")
+        layout.addWidget(self.text, 1)
+
+        btn_layout = QHBoxLayout()
+        btn_ok = QPushButton("确定")
+        btn_ok.clicked.connect(self.accept)
+        btn_cancel = QPushButton("取消")
+        btn_cancel.clicked.connect(self.reject)
+        btn_layout.addStretch()
+        btn_layout.addWidget(btn_ok)
+        btn_layout.addWidget(btn_cancel)
+        layout.addLayout(btn_layout)
+
+    def get_new_ids(self):
+        return parse_id_input(self.text.toPlainText())
+
 
 
 if __name__ == '__main__':
+    # Windows 高分屏适配（必须在 QApplication 创建前设置）
+    if hasattr(Qt, 'AA_EnableHighDpiScaling'):
+        QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
+    if hasattr(Qt, 'AA_UseHighDpiPixmaps'):
+        QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
+
     app = QApplication(sys.argv)
     app.setWindowIcon(QIcon(resource_path('app_icon.ico')))  # 图标也用 resource_path
 
@@ -1518,5 +1581,10 @@ if __name__ == '__main__':
     window = MainWindow()
     splash.finish(window)
     window.show()
+
+    # 用户工号验证：以主界面为背景，通过后才可使用软件功能
+    login = UserIdDialog(window)
+    if login.exec_() != QDialog.Accepted:
+        sys.exit(0)
 
     sys.exit(app.exec_())

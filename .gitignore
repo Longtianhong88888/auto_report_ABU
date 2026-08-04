@@ -12,10 +12,23 @@ __pycache__/
 dist/
 build/
 *.spec.bak
+*.spec
 
 # 系统文件
 .DS_Store
 Thumbs.db
 
-# 配置文件（可选，如果包含敏感信息）
-config.json
+# 测试/验证用的 Excel 数据与模板文件
+*.xlsx
+*.xls
+*.xlsm
+*.xlsb
+
+# 程序生成的模板配套配置（_config.json）
+*_config.json
+
+# 运行时生成的授权ID数据（个人环境数据，不入库）
+authorized_ids.json
+
+# ACF 验证素材文件夹（模板、IPQC数据、X-section图片、输出报告）
+/CLO-M C6.0 C6081  ACF9201 MBO/
