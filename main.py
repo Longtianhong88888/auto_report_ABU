@@ -35,6 +35,7 @@ from dialogs import (
 )
 from mapping_operations import MappingOperations
 from version_finder import suggest_files
+from table_zoom import TableZoomMixin
 
 
 def resource_path(relative_path):
@@ -59,7 +60,7 @@ def global_exception_hook(exctype, value, tb):
 sys.excepthook = global_exception_hook
 
 
-class MainWindow(QMainWindow, MappingOperations):
+class MainWindow(QMainWindow, MappingOperations, TableZoomMixin):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("自动M/PBO报告制作软件")
@@ -118,6 +119,7 @@ class MainWindow(QMainWindow, MappingOperations):
         table_palette.setColor(QPalette.AlternateBase, QColor("#F7F7F7"))
         table_palette.setColor(QPalette.Window, QColor("#FFFFFF"))
         self.table.setPalette(table_palette)
+        self.enable_table_zoom(self.table)
         center_layout.addWidget(self.table)
 
         # 右侧
@@ -441,6 +443,7 @@ class MainWindow(QMainWindow, MappingOperations):
 
     def display_sheet(self, ws):
         self.table.clear()
+        self.zoom_begin()
         self.table.clearSpans()
         real_max_row = ws.max_row
         real_max_col = ws.max_column
@@ -487,14 +490,17 @@ class MainWindow(QMainWindow, MappingOperations):
                     self.table.setItem(row_idx - 1, col_idx - 1, item)
                     continue
                 item = QTableWidgetItem(str(cell.value))
+                base_size = 10
                 if cell.font:
                     font = QFont()
                     font.setFamily(cell.font.name or 'Arial')
                     size = cell.font.size or 10
                     if size is not None:
                         font.setPointSize(int(size))
+                        base_size = int(size)
                     font.setBold(cell.font.bold)
                     item.setFont(font)
+                self.zoom_track_item(row_idx - 1, col_idx - 1, base_size)
                 bg = self._cell_fill_color(cell, wb)
                 if bg is not None:
                     item.setBackground(bg)
@@ -511,14 +517,14 @@ class MainWindow(QMainWindow, MappingOperations):
         for col in range(1, max_cols + 1):
             width_chars = self._column_width_chars(ws, col)
             width = int(width_chars * COL_WIDTH_PX_PER_CHAR)
-            self.table.setColumnWidth(col - 1, width)
+            self.zoom_size(col - 1, width, None, None)
         for row in range(1, max_rows + 1):
             if row in ws.row_dimensions and ws.row_dimensions[row].height:
                 height = int(ws.row_dimensions[row].height * ROW_HEIGHT_PX_PER_PT)
             else:
                 default_pts = ws.sheet_format.defaultRowHeight or DEFAULT_ROW_HEIGHT_PTS
                 height = int(default_pts * ROW_HEIGHT_PX_PER_PT)
-            self.table.setRowHeight(row - 1, height)
+            self.zoom_size(None, None, row - 1, height)
 
     @staticmethod
     def _column_width_chars(ws, col_idx):

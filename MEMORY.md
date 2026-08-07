@@ -40,6 +40,7 @@
   - Build Phase / Configuration / Event：从“IPQC 数据所在文件夹名 → 上一级文件夹名”依次解析并合并（每项取第一个命中）
   - 解析失败字段跳过更新，弹窗提示“请在报告中手动修改”，弹窗会列出已查找的文件夹
 - 默认输出文件名：沿用模板文件名格式，替换 Configuration（`C\d{4}`）与 Event（`MBO|PBO`）段，不含 Build Phase；保存对话框预填，其余由用户自行修改
+- 所有报表预览表格支持缩放：Ctrl+滚轮（Windows）与 Mac 触控板双指捏合（`TableZoomMixin`，table_zoom.py），同步缩放列宽/行高/字体，事件 50ms 合并防卡顿；应用于主预览表与 SourceSelectDialog
 
 ### 配置体系（2026-08 重构后）
 - 打开模板**不再自动加载**配置；`self.mappings` 初始为空
@@ -64,6 +65,7 @@
 - 主题色 tint 按 OOXML 公式计算（负值向黑、正值向白）
 - **openpyxl 不展开 `<col min max>` 区间列**（如 `<col min="3" max="13" width="33"/>`）→ `_column_width_chars()` 遍历 `column_dimensions` 按 min/max 匹配；未定义列回落 `defaultColWidth`；行高同理回落 `defaultRowHeight`（main.py 与 dialogs.py 各有一份）
 - 正则 `\b` 会把下划线当单词字符 → 文件名/文件夹名匹配用 `(?<![A-Za-z0-9])…(?![A-Za-z0-9])`
+- **混入类 MRO 坑**：PyQt 类的 MRO 中 Qt 类排在普通混入类之前，`TableZoomMixin.eventFilter` 里不能调 `super().eventFilter`（会落到 `object` 报 AttributeError，且异常被 Qt 吞掉后事件空转像卡死）→ 直接 `return False` 放行即可
 
 ## 六、已知问题与待办
 

@@ -16,6 +16,7 @@ from constants import (
     MAX_PREVIEW_ROWS, MAX_PREVIEW_COLS,
 )
 from version_finder import detect_version, suggest_files
+from table_zoom import TableZoomMixin
 
 # ================== 图片设置对话框 ==================
 class ImageSetupDialog(QDialog):
@@ -388,7 +389,7 @@ class JMPConfigDialog(QDialog):
 
 
 # ================== 源数据选择对话框 ==================
-class SourceSelectDialog(QDialog):
+class SourceSelectDialog(QDialog, TableZoomMixin):
     def __init__(self, source_wb, parent=None, default_sheet=None):
         super().__init__(parent)
         self.setWindowTitle("选择数据源区域")
@@ -411,6 +412,7 @@ class SourceSelectDialog(QDialog):
         self.table = QTableWidget()
         self.table.setSelectionMode(QAbstractItemView.ContiguousSelection)
         self.table.itemSelectionChanged.connect(self.on_selection_changed)
+        self.enable_table_zoom(self.table)
         main_layout.addWidget(self.table)
 
         bottom_layout = QHBoxLayout()
@@ -431,6 +433,7 @@ class SourceSelectDialog(QDialog):
     def load_sheet(self, sheet_name):
         ws = self.source_wb[sheet_name]
         self.table.clear()
+        self.zoom_begin()
         self.table.clearSpans()
         real_max_row = ws.max_row
         real_max_col = ws.max_column
@@ -467,6 +470,7 @@ class SourceSelectDialog(QDialog):
             if cell.value is not None:
                 item = QTableWidgetItem(str(cell.value))
                 self.table.setItem(row_idx - 1, col_idx - 1, item)
+                self.zoom_track_item(row_idx - 1, col_idx - 1, 10)
 
         self._apply_uniform_sizes(ws, max_cols, max_rows)
         self.selected_range = None
@@ -476,14 +480,14 @@ class SourceSelectDialog(QDialog):
         for col in range(1, max_cols + 1):
             width_chars = self._column_width_chars(ws, col)
             width = int(width_chars * COL_WIDTH_PX_PER_CHAR)
-            self.table.setColumnWidth(col - 1, width)
+            self.zoom_size(col - 1, width, None, None)
         for row in range(1, max_rows + 1):
             if row in ws.row_dimensions and ws.row_dimensions[row].height:
                 height = int(ws.row_dimensions[row].height * ROW_HEIGHT_PX_PER_PT)
             else:
                 default_pts = ws.sheet_format.defaultRowHeight or DEFAULT_ROW_HEIGHT_PTS
                 height = int(default_pts * ROW_HEIGHT_PX_PER_PT)
-            self.table.setRowHeight(row - 1, height)
+            self.zoom_size(None, None, row - 1, height)
 
     @staticmethod
     def _column_width_chars(ws, col_idx):
