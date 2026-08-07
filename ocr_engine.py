@@ -33,6 +33,9 @@ def _get_ocr(lang='ch'):
         raise _ocr_init_error
     try:
         import sys
+        # Windows CPU 上 PIR 新执行器 + OneDNN(MKLDNN) 对 PP-OCRv6 模型
+        # 有已知崩溃（ConvertPirAttribute2RuntimeAttribute），强制关闭 MKLDNN
+        os.environ.setdefault('PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT', 'false')
         # 确定内置模型路径
         bundled = None
         if hasattr(sys, '_MEIPASS'):
@@ -59,6 +62,7 @@ def _get_ocr(lang='ch'):
         from paddleocr import PaddleOCR
         kwargs = dict(
             lang=lang,
+            enable_mkldnn=False,
             use_doc_orientation_classify=False,
             use_doc_unwarping=False,
             use_textline_orientation=False,

@@ -30,11 +30,15 @@ jobs:
         PADDLE_PDX_CACHE_HOME: ${{ github.workspace }}/paddleocr_models
         PADDLE_PDX_MODEL_HOME: ${{ github.workspace }}/paddleocr_models
       run: |
+        $ErrorActionPreference = 'Stop'
         # 初始化 PaddleOCR 触发模型下载（检测+识别两个模型）
         python -c "
         import os
+        # Windows CPU：PIR+OneDNN 对 PP-OCRv6 有已知崩溃，关闭 MKLDNN
+        os.environ['PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT'] = 'false'
         from paddleocr import PaddleOCR
         ocr = PaddleOCR(lang='en',
+                        enable_mkldnn=False,
                         use_doc_orientation_classify=False,
                         use_doc_unwarping=False,
                         use_textline_orientation=False)
