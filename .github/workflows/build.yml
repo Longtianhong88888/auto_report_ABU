@@ -25,12 +25,14 @@ jobs:
 
     - name: Pre-download PaddleOCR models
       shell: pwsh
+      env:
+        PADDLEX_HOME: ${{ github.workspace }}/paddleocr_models
+        PADDLE_PDX_CACHE_HOME: ${{ github.workspace }}/paddleocr_models
+        PADDLE_PDX_MODEL_HOME: ${{ github.workspace }}/paddleocr_models
       run: |
-        # 初始化 PaddleOCR 触发模型下载（仅需检测+识别两个模型）
+        # 初始化 PaddleOCR 触发模型下载（检测+识别两个模型）
         python -c "
         import os
-        # 模型下载到项目目录
-        os.environ['PADDLEX_HOME'] = os.path.join(os.getcwd(), 'paddleocr_models')
         from paddleocr import PaddleOCR
         ocr = PaddleOCR(lang='en',
                         use_doc_orientation_classify=False,
@@ -39,15 +41,36 @@ jobs:
         # 跑一次 warm-up 确保模型完全加载
         import numpy as np
         dummy = np.zeros((100, 200, 3), dtype='uint8')
-        ocr.ocr(dummy)
+        ocr.predict(dummy)
         print('Models downloaded OK')
         "
-        # 删除不需要的预处理模型（减小包体积）
-        $official = 'paddleocr_models\official_models'
-        $keep = @('PP-OCRv6_medium_det', 'PP-OCRv6_medium_rec')
-        Get-ChildItem $official -Directory | Where-Object { $_.Name -notin $keep } | Remove-Item -Recurse -Force
-        Write-Output "Model size:"
-        Get-ChildItem $official -Recurse -File | Measure-Object -Property Length -Sum | ForEach-Object { "{0:N0} MB" -f ($_.Sum / 1MB) }
+        # 无论模型落在哪个缓存目录，都复制到项目目录供打包
+        $dest = Join-Path (Get-Location) 'paddleocr_models\official_models'
+        New-Item -ItemType Directory -Force -Path $dest | Out-Null
+        $roots = @($env:USERPROFILE, $env:LOCALAPPDATA, (Get-Location).Path)
+        $found = @()
+        foreach ($root in $roots) {
+          if ($root -and (Test-Path $root)) {
+            $found += Get-ChildItem -Path $root -Recurse -Directory -Filter 'PP-OCRv6_medium_*' -ErrorAction SilentlyContinue
+          }
+        }
+        $copied = @()
+        foreach ($d in ($found | Sort-Object FullName -Unique)) {
+          $target = Join-Path $dest $d.Name
+          if (-not (Test-Path $target)) {
+            Copy-Item -Recurse -Force $d.FullName $target
+            $copied += $d.Name
+          }
+        }
+        # 只保留检测+识别模型，删除其它（减小包体积）
+        Get-ChildItem $dest -Directory | Where-Object { $_.Name -notin @('PP-OCRv6_medium_det', 'PP-OCRv6_medium_rec') } | Remove-Item -Recurse -Force
+        if ((Get-ChildItem $dest -Directory | Measure-Object).Count -eq 0) {
+          throw "未找到 OCR 模型文件（PP-OCRv6_medium_det/rec），构建中止"
+        }
+        Write-Output "Copied models: $($copied -join ', ')"
+        $size = (Get-ChildItem $dest -Recurse -File | Measure-Object -Property Length -Sum).Sum
+        Write-Output ("Model size: {0:N0} MB" -f ($size / 1MB))
+        Get-ChildItem $dest -Directory | ForEach-Object { Write-Output $_.Name }
 
     - name: Build directory package
       shell: pwsh
