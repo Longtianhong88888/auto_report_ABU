@@ -23,6 +23,7 @@
 | `version_finder.py` | 从 PDF/Excel 档案提取版本号 |
 | `user_auth.py` | 授权工号加载/保存/批量解析 |
 | `table_zoom.py` | `TableZoomMixin`：表格缩放（Ctrl+滚轮/Mac 捏合）与 Ctrl+Shift+方向键快速选区 |
+| `utils.py` | 公共函数：`column_width_chars`（区间列宽）、`apply_uniform_sizes`（统一尺寸）、`normalize_mappings`（配置标准化） |
 | `constants.py` | 尺寸常量、默认授权工号、管理员与密码 |
 
 ## 三、核心业务流程
@@ -50,6 +51,8 @@
 - “保存配置”：`QFileDialog` 自定义文件名（默认“模板名_config.json”），内容只保留映射路径，剥离 `image_bytes`
 - “导入我的配置”：选择 .json；来源模板与当前不一致时确认；导入后刷新映射列表
 - 图片映射记录来源路径 `image_src_sheet` + `image_src_pos`（源 Sheet + 图片锚点位置），输出时从当前 IPQC 数据源按位置重新读取；旧配置 `image_ref=[sheet, idx]` 兼容回退
+- 配置导入时经 `utils.normalize_mappings` 标准化：JMP `header_cols` 统一为字符串列表（旧配置字符串兼容移到导入时处理）、`block_range`/`target_range` 列表转元组
+- 图片缓存失败会统计并弹窗提示（全部失败提示文件可能损坏），不再静默忽略
 
 ## 四、业务提取规则
 

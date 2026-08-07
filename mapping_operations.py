@@ -354,10 +354,8 @@ class MappingOperations:
         start_row = row_num
         start_col = column_index_from_string(col_letter)
         # 表头列数与内容：数据一律从 锚点列 + 表头列数 之后开始张贴
-        raw_headers = mapping.get('header_cols', [])
-        if isinstance(raw_headers, str):  # 兼容旧配置以字符串存储的情况
-            raw_headers = [raw_headers]
-        headers = [str(h) for h in raw_headers]
+        # header_cols 在配置导入时已标准化为字符串列表（utils.normalize_mappings）
+        headers = [str(h) for h in mapping.get('header_cols', [])]
         header_count = len(headers)
         data_start_col = start_col + header_count
         src_sheet_name = mapping['source_sheet']

@@ -3,8 +3,17 @@
 给 QTableWidget 增加 Ctrl+滚轮 / Mac 触控板双指捏合缩放：
 同步缩放列宽、行高与单元格字体（事件 50ms 合并，避免卡顿）；
 以及 Ctrl+Shift+方向键按 Excel 习惯快速扩展选区。
+
+⚠️ 继承顺序契约：本混入类依赖 PyQt 的 MRO 特性——QMainWindow/QDialog 等
+Qt 类必须排在 TableZoomMixin 之前（如
+`class MainWindow(QMainWindow, MappingOperations, TableZoomMixin)`）。
+此时本类在 MRO 中位于 Qt 类之后，eventFilter 里调用 super().eventFilter
+会落到 object 并抛 AttributeError（异常被 Qt 吞掉后事件空转像卡死）。
+因此 eventFilter 一律直接 return False 放行，不得调用 super()。
+若未来调整继承顺序，enable_table_zoom 中的断言会立即报错提示。
 """
 from PyQt5.QtCore import Qt, QEvent, QTimer, QItemSelection, QItemSelectionModel
+from PyQt5.QtWidgets import QWidget
 
 
 class TableZoomMixin:
@@ -12,6 +21,11 @@ class TableZoomMixin:
     ZOOM_MAX = 3.0
 
     def enable_table_zoom(self, table):
+        mro = type(self).__mro__
+        assert TableZoomMixin in mro and mro.index(TableZoomMixin) > mro.index(QWidget), (
+            "TableZoomMixin 必须位于 Qt 类（QWidget）之后（PyQt MRO 特性），"
+            "否则 eventFilter 中不能使用 super()，请调整继承顺序"
+        )
         self._zoom_table = table
         self._zoom = 1.0
         self._zoom_base_w = {}

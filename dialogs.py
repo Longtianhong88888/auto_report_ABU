@@ -10,13 +10,11 @@ from PyQt5.QtGui import QIcon, QPixmap
 from PyQt5.QtCore import Qt, QSize, QTimer
 from openpyxl.utils import range_boundaries, get_column_letter, column_index_from_string
 from constants import (
-    COL_WIDTH_PX_PER_CHAR, ROW_HEIGHT_PX_PER_PT,
-    DEFAULT_COL_WIDTH_CHARS, DEFAULT_COL_WIDTH_PX,
-    DEFAULT_ROW_HEIGHT_PTS, DEFAULT_ROW_HEIGHT_PX,
     MAX_PREVIEW_ROWS, MAX_PREVIEW_COLS,
 )
 from version_finder import detect_version, suggest_files
 from table_zoom import TableZoomMixin
+from utils import column_width_chars, apply_uniform_sizes
 
 # ================== 图片设置对话框 ==================
 class ImageSetupDialog(QDialog):
@@ -472,40 +470,9 @@ class SourceSelectDialog(QDialog, TableZoomMixin):
                 self.table.setItem(row_idx - 1, col_idx - 1, item)
                 self.zoom_track_item(row_idx - 1, col_idx - 1, 10)
 
-        self._apply_uniform_sizes(ws, max_cols, max_rows)
+        apply_uniform_sizes(self.table, ws, max_cols, max_rows, zoom=self)
         self.selected_range = None
         self.range_label.setText("未选择区域")
-
-    def _apply_uniform_sizes(self, ws, max_cols, max_rows):
-        for col in range(1, max_cols + 1):
-            width_chars = self._column_width_chars(ws, col)
-            width = int(width_chars * COL_WIDTH_PX_PER_CHAR)
-            self.zoom_size(col - 1, width, None, None)
-        for row in range(1, max_rows + 1):
-            if row in ws.row_dimensions and ws.row_dimensions[row].height:
-                height = int(ws.row_dimensions[row].height * ROW_HEIGHT_PX_PER_PT)
-            else:
-                default_pts = ws.sheet_format.defaultRowHeight or DEFAULT_ROW_HEIGHT_PTS
-                height = int(default_pts * ROW_HEIGHT_PX_PER_PT)
-            self.zoom_size(None, None, row - 1, height)
-
-    @staticmethod
-    def _column_width_chars(ws, col_idx):
-        """解析某列宽度（字符数），兼容 openpyxl 不展开的区间列定义。
-        Excel 常写成 <col min="3" max="13" width="33"/>，openpyxl 只保留
-        首列索引，其余列查不到，需要遍历全部维度按 min/max 区间匹配。
-        未定义列退回 sheet 默认列宽。"""
-        letter = get_column_letter(col_idx)
-        if letter in ws.column_dimensions:
-            dim = ws.column_dimensions[letter]
-            if dim.width:
-                return dim.width
-        for dim in ws.column_dimensions.values():
-            lo = getattr(dim, 'min', None) or 0
-            hi = getattr(dim, 'max', None) or lo
-            if lo <= col_idx <= hi and dim.width:
-                return dim.width
-        return ws.sheet_format.defaultColWidth or DEFAULT_COL_WIDTH_CHARS
 
     def on_selection_changed(self):
         indexes = self.table.selectedIndexes()

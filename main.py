@@ -20,9 +20,7 @@ import openpyxl
 from openpyxl.utils import range_boundaries, get_column_letter, column_index_from_string
 from openpyxl.styles.colors import COLOR_INDEX
 from constants import (
-    COL_WIDTH_PX_PER_CHAR, ROW_HEIGHT_PX_PER_PT,
-    DEFAULT_COL_WIDTH_CHARS, DEFAULT_COL_WIDTH_PX,
-    DEFAULT_ROW_HEIGHT_PTS, DEFAULT_ROW_HEIGHT_PX,
+    DEFAULT_ROW_HEIGHT_PTS,
     ADMIN_USER_ID, ADMIN_AUTH_PASSWORD,
     MAX_PREVIEW_ROWS, MAX_PREVIEW_COLS,
 )
@@ -36,6 +34,7 @@ from dialogs import (
 from mapping_operations import MappingOperations
 from version_finder import suggest_files
 from table_zoom import TableZoomMixin
+from utils import column_width_chars, apply_uniform_sizes, normalize_mappings
 
 
 def resource_path(relative_path):
@@ -211,6 +210,7 @@ class MainWindow(QMainWindow, MappingOperations, TableZoomMixin):
         total = sum(len(ws._images) for ws in self.source_wb.worksheets)
         prog = self._make_progress("正在读取数据源图片，请稍等…", total)
         done = 0
+        failed = []
         for sheet_name in self.source_wb.sheetnames:
             ws = self.source_wb[sheet_name]
             for idx, img in enumerate(ws._images):
@@ -227,7 +227,7 @@ class MainWindow(QMainWindow, MappingOperations, TableZoomMixin):
                     try:
                         img_data = img.ref.read()
                     except Exception as e:
-                        print(f"警告：无法读取图片 {pos}：{e}")
+                        failed.append(f"{sheet_name}!{pos}（{e}）")
                         done += 1
                         self._update_progress(prog, done, total)
                         continue
@@ -237,6 +237,20 @@ class MainWindow(QMainWindow, MappingOperations, TableZoomMixin):
                 done += 1
                 self._update_progress(prog, done, total)
         self._close_progress(prog)
+        if failed:
+            detail = "\n".join(failed[:10])
+            more = len(failed) - 10
+            suffix = f"\n…另有 {more} 处" if more > 0 else ""
+            if total > 0 and len(failed) == total:
+                QMessageBox.warning(
+                    self, "图片读取异常",
+                    f"数据源 {len(failed)} 张图片全部读取失败，"
+                    "文件可能已损坏，请确认后重新打开：\n\n" + detail + suffix)
+            else:
+                QMessageBox.warning(
+                    self, "部分图片读取失败",
+                    f"有 {len(failed)}/{total} 张图片读取失败，"
+                    "对应图片映射将无法输出，请检查数据源：\n\n" + detail + suffix)
 
     def _make_progress(self, label, total):
         """创建模态进度条弹窗（不可取消；立即显示）"""
@@ -511,38 +525,7 @@ class MainWindow(QMainWindow, MappingOperations, TableZoomMixin):
         except Exception as e:
             QMessageBox.warning(self, "渲染警告", f"表格渲染出现异常：{e}")
 
-        self._apply_uniform_sizes(ws, max_cols, max_rows)
-
-    def _apply_uniform_sizes(self, ws, max_cols, max_rows):
-        for col in range(1, max_cols + 1):
-            width_chars = self._column_width_chars(ws, col)
-            width = int(width_chars * COL_WIDTH_PX_PER_CHAR)
-            self.zoom_size(col - 1, width, None, None)
-        for row in range(1, max_rows + 1):
-            if row in ws.row_dimensions and ws.row_dimensions[row].height:
-                height = int(ws.row_dimensions[row].height * ROW_HEIGHT_PX_PER_PT)
-            else:
-                default_pts = ws.sheet_format.defaultRowHeight or DEFAULT_ROW_HEIGHT_PTS
-                height = int(default_pts * ROW_HEIGHT_PX_PER_PT)
-            self.zoom_size(None, None, row - 1, height)
-
-    @staticmethod
-    def _column_width_chars(ws, col_idx):
-        """解析某列宽度（字符数），兼容 openpyxl 不展开的区间列定义。
-        Excel 常写成 <col min="3" max="13" width="33"/>，openpyxl 只保留
-        首列索引，其余列查不到，需要遍历全部维度按 min/max 区间匹配。
-        未定义列退回 sheet 默认列宽。"""
-        letter = get_column_letter(col_idx)
-        if letter in ws.column_dimensions:
-            dim = ws.column_dimensions[letter]
-            if dim.width:
-                return dim.width
-        for dim in ws.column_dimensions.values():
-            lo = getattr(dim, 'min', None) or 0
-            hi = getattr(dim, 'max', None) or lo
-            if lo <= col_idx <= hi and dim.width:
-                return dim.width
-        return ws.sheet_format.defaultColWidth or DEFAULT_COL_WIDTH_CHARS
+        apply_uniform_sizes(self.table, ws, max_cols, max_rows, zoom=self)
 
     # ==================== 右键菜单 ====================
     def show_context_menu(self, pos):
@@ -702,7 +685,7 @@ class MainWindow(QMainWindow, MappingOperations, TableZoomMixin):
                 row_span = m_max_row - m_min_row + 1
                 break
         width_chars = sum(
-            self._column_width_chars(ws, c)
+            column_width_chars(ws, c)
             for c in range(col, col + col_span)
         )
         height_pts = 0.0
@@ -889,7 +872,8 @@ class MainWindow(QMainWindow, MappingOperations, TableZoomMixin):
                 continue
             if key == 'process_control':
                 try:
-                    value = float(value) if re.match(r'^\d+\.?\d*$', value) else value
+                    # 数值版本号（如 3.55）保留合理精度，避免浮点二进制误差
+                    value = round(float(value), 6) if re.match(r'^\d+\.?\d*$', value) else value
                 except ValueError:
                     pass
             else:
@@ -1436,7 +1420,7 @@ class MainWindow(QMainWindow, MappingOperations, TableZoomMixin):
                     QMessageBox.Yes | QMessageBox.No)
                 if reply != QMessageBox.Yes:
                     return
-            self.mappings = mappings
+            self.mappings = normalize_mappings(mappings)
             self.refresh_mapping_list()
             QMessageBox.information(self, "完成", f"已导入 {len(mappings)} 条映射")
         except Exception as e:
