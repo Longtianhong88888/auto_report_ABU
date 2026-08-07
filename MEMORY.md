@@ -8,7 +8,8 @@
 - 入口：`main.py`；依赖：`requirements.txt`（PyQt5、openpyxl、Pillow 等）
 - Windows 打包：GitHub Actions（`.github/workflows/build.yml`），push 到 main 自动构建，产物 `dist/auto_report.zip`（PyInstaller 目录包 + 图标/splash）
 - 远程仓库：`origin git@github.com:Longtianhong88888/auto_report_ABU.git`，分支 `main`
-- 最新提交：`4aca0f8 新增模块化重构、用户授权、版本号查找与Summary自动填充`（已推送）
+- 最新提交：`bbee4c5 表格支持 Ctrl+Shift+方向键快速扩展选区`（已推送）
+- 近三次提交：`02ad559`（JMP 500 行上限修复）、`9c11366`（表格缩放）、`bbee4c5`（Ctrl+Shift+方向键选区）
 - 本地未提交内容：`manual_shots/`（说明书截图）、使用说明书 PPT、`问题点.txt`（用户问题清单）
 
 ## 二、模块结构
@@ -21,6 +22,7 @@
 | `safe_eval.py` | 自定义表达式受限安全求值 |
 | `version_finder.py` | 从 PDF/Excel 档案提取版本号 |
 | `user_auth.py` | 授权工号加载/保存/批量解析 |
+| `table_zoom.py` | `TableZoomMixin`：表格缩放（Ctrl+滚轮/Mac 捏合）与 Ctrl+Shift+方向键快速选区 |
 | `constants.py` | 尺寸常量、默认授权工号、管理员与密码 |
 
 ## 三、核心业务流程
