@@ -24,6 +24,7 @@ from constants import (
     DEFAULT_COL_WIDTH_CHARS, DEFAULT_COL_WIDTH_PX,
     DEFAULT_ROW_HEIGHT_PTS, DEFAULT_ROW_HEIGHT_PX,
     ADMIN_USER_ID, ADMIN_AUTH_PASSWORD,
+    MAX_PREVIEW_ROWS, MAX_PREVIEW_COLS,
 )
 from user_auth import load_authorized_ids, save_authorized_ids, parse_id_input
 from safe_eval import _check_transform_expr
@@ -456,8 +457,8 @@ class MainWindow(QMainWindow, MappingOperations):
                     break
             real_max_col += 2
 
-        max_rows = min(real_max_row, 500)
-        max_cols = min(real_max_col, 100)
+        max_rows = min(real_max_row, MAX_PREVIEW_ROWS)
+        max_cols = min(real_max_col, MAX_PREVIEW_COLS)
         self.table.setRowCount(max_rows)
         self.table.setColumnCount(max_cols)
 
@@ -471,33 +472,36 @@ class MainWindow(QMainWindow, MappingOperations):
                 self.table.setSpan(min_row-1, min_col-1, span_rows, span_cols)
 
             wb = ws.parent
-            for row_idx, row in enumerate(ws.iter_rows(min_row=1, max_row=max_rows, max_col=max_cols), start=1):
-                for col_idx, cell in enumerate(row, start=1):
-                    if cell.value is None:
-                        # 空单元格只要渲染填充色（字体色无意义），无填充则跳过
-                        bg = self._cell_fill_color(cell, wb)
-                        if bg is None:
-                            continue
-                        item = QTableWidgetItem("")
-                        item.setBackground(bg)
-                        self.table.setItem(row_idx - 1, col_idx - 1, item)
-                        continue
-                    item = QTableWidgetItem(str(cell.value))
-                    if cell.font:
-                        font = QFont()
-                        font.setFamily(cell.font.name or 'Arial')
-                        size = cell.font.size or 10
-                        if size is not None:
-                            font.setPointSize(int(size))
-                        font.setBold(cell.font.bold)
-                        item.setFont(font)
+            # 稀疏遍历：只处理工作簿中真实存在的单元格，
+            # 避免 iter_rows 为超大表物化大量空单元格导致卡顿
+            for (row_idx, col_idx), cell in ws._cells.items():
+                if row_idx > max_rows or col_idx > max_cols:
+                    continue
+                if cell.value is None:
+                    # 空单元格只要渲染填充色（字体色无意义），无填充则跳过
                     bg = self._cell_fill_color(cell, wb)
-                    if bg is not None:
-                        item.setBackground(bg)
-                    fg = self._cell_font_color(cell, wb)
-                    if fg is not None:
-                        item.setForeground(fg)
-                    self.table.setItem(row_idx-1, col_idx-1, item)
+                    if bg is None:
+                        continue
+                    item = QTableWidgetItem("")
+                    item.setBackground(bg)
+                    self.table.setItem(row_idx - 1, col_idx - 1, item)
+                    continue
+                item = QTableWidgetItem(str(cell.value))
+                if cell.font:
+                    font = QFont()
+                    font.setFamily(cell.font.name or 'Arial')
+                    size = cell.font.size or 10
+                    if size is not None:
+                        font.setPointSize(int(size))
+                    font.setBold(cell.font.bold)
+                    item.setFont(font)
+                bg = self._cell_fill_color(cell, wb)
+                if bg is not None:
+                    item.setBackground(bg)
+                fg = self._cell_font_color(cell, wb)
+                if fg is not None:
+                    item.setForeground(fg)
+                self.table.setItem(row_idx - 1, col_idx - 1, item)
         except Exception as e:
             QMessageBox.warning(self, "渲染警告", f"表格渲染出现异常：{e}")
 

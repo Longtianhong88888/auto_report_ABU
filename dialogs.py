@@ -13,6 +13,7 @@ from constants import (
     COL_WIDTH_PX_PER_CHAR, ROW_HEIGHT_PX_PER_PT,
     DEFAULT_COL_WIDTH_CHARS, DEFAULT_COL_WIDTH_PX,
     DEFAULT_ROW_HEIGHT_PTS, DEFAULT_ROW_HEIGHT_PX,
+    MAX_PREVIEW_ROWS, MAX_PREVIEW_COLS,
 )
 from version_finder import detect_version, suggest_files
 
@@ -445,8 +446,8 @@ class SourceSelectDialog(QDialog):
                     real_max_col = c
                     break
             real_max_col += 2
-        max_rows = min(real_max_row, 500)
-        max_cols = min(real_max_col, 100)
+        max_rows = min(real_max_row, MAX_PREVIEW_ROWS)
+        max_cols = min(real_max_col, MAX_PREVIEW_COLS)
 
         self.table.setRowCount(max_rows)
         self.table.setColumnCount(max_cols)
@@ -459,11 +460,13 @@ class SourceSelectDialog(QDialog):
             span_cols = min(max_col, max_cols) - min_col + 1
             self.table.setSpan(min_row-1, min_col-1, span_rows, span_cols)
 
-        for row_idx, row in enumerate(ws.iter_rows(min_row=1, max_row=max_rows, max_col=max_cols), start=1):
-            for col_idx, cell in enumerate(row, start=1):
-                if cell.value is not None:
-                    item = QTableWidgetItem(str(cell.value))
-                    self.table.setItem(row_idx-1, col_idx-1, item)
+        # 稀疏遍历：只处理真实存在的单元格，避免大表物化空单元格
+        for (row_idx, col_idx), cell in ws._cells.items():
+            if row_idx > max_rows or col_idx > max_cols:
+                continue
+            if cell.value is not None:
+                item = QTableWidgetItem(str(cell.value))
+                self.table.setItem(row_idx - 1, col_idx - 1, item)
 
         self._apply_uniform_sizes(ws, max_cols, max_rows)
         self.selected_range = None
