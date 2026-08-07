@@ -32,3 +32,6 @@ authorized_ids.json
 
 # ACF 验证素材文件夹（模板、IPQC数据、X-section图片、输出报告）
 /CLO-M C6.0 C6081  ACF9201 MBO/
+
+# OCR 模型文件（体积大，CI 中自动下载）
+/paddleocr_models/

@@ -24,6 +24,9 @@
 | `user_auth.py` | 授权工号加载/保存/批量解析 |
 | `table_zoom.py` | `TableZoomMixin`：表格缩放（Ctrl+滚轮/Mac 捏合）与 Ctrl+Shift+方向键快速选区 |
 | `utils.py` | 公共函数：`column_width_chars`（区间列宽）、`apply_uniform_sizes`（统一尺寸）、`normalize_mappings`（配置标准化） |
+| `ocr_engine.py` | OCR 引擎：PaddleOCR 懒加载单例（兼容 ocr()/predict()）、预处理、数值提取 |
+| `ocr_worker.py` | OCR 后台线程（对话框预览用） |
+| `ocr_dialog.py` | OCR 切片量测配置对话框（ROI 框选、预览、表达式） |
 | `constants.py` | 尺寸常量、默认授权工号、管理员与密码 |
 
 ## 三、核心业务流程
@@ -53,6 +56,7 @@
 - 图片映射记录来源路径 `image_src_sheet` + `image_src_pos`（源 Sheet + 图片锚点位置），输出时从当前 IPQC 数据源按位置重新读取；旧配置 `image_ref=[sheet, idx]` 兼容回退
 - 配置导入时经 `utils.normalize_mappings` 标准化：JMP `header_cols` 统一为字符串列表（旧配置字符串兼容移到导入时处理）、`block_range`/`target_range` 列表转元组
 - 图片缓存失败会统计并弹窗提示（全部失败提示文件可能损坏），不再静默忽略
+- OCR 切片量测（右键 → OCR识别）：单值/按标签/全部数值/自定义模式，ROI 框选、5 种预处理；映射写入 target_cells；数值提取优先取“= 后面的值”避免标签数字误判；`all_numbers` 多值时逗号拼接写入单格
 
 ## 四、业务提取规则
 
@@ -81,6 +85,8 @@
 - openpyxl 保存后图片 `ref` 会被关闭 → 用 `_snapshot_template_images` / `_refresh_image_refs` 重建
 - `generate_acf_report.py` 已从磁盘删除（README 已更新，代码无引用）
 - 本地 `authorized_ids.json` 当前含 G1653332/G1655895/G1659304（不入库，gitignore 已忽略）
+- OCR 功能：本机 venv 尚未成功安装 paddlepaddle/paddleocr（需 `pip install -r requirements.txt` 或手动安装），`ocr_available()` 为 False 时菜单禁用；requirements 已锁 `paddlepaddle/paddleocr>=3.0,<4.0`；CI 在 Windows 上预下载 PP-OCRv6 det/rec 模型并打包（`paddleocr_models/` 已 gitignore）
+- OCR 已知限制：按标签独立 ROI（label_rois / ocr_batch_with_rois）尚未在对话框/输出中接入；输出阶段 OCR 同步执行（已加 processEvents 刷新进度，未做线程化）
 
 ## 七、测试与交付
 

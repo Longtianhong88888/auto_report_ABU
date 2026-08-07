@@ -31,6 +31,8 @@ from dialogs import (
     SourceSelectDialog, InternalImageSelectDialog, BatchImageDialog,
     VersionFinderDialog,
 )
+from ocr_dialog import OCRSetupDialog
+from ocr_engine import ocr_available
 from mapping_operations import MappingOperations
 from version_finder import suggest_files
 from table_zoom import TableZoomMixin
@@ -559,6 +561,12 @@ class MainWindow(QMainWindow, MappingOperations, TableZoomMixin):
             menu.addAction(QAction("设为图片区域", self, triggered=self.add_image_mapping))
             menu.addAction(QAction("设为归档区域（右移）", self, triggered=self.add_archive_mapping))
             menu.addAction(QAction("设为JMP数据区", self, triggered=self.add_jmp_mapping))
+            # OCR 切片量测（需要 PaddleOCR）
+            ocr_action = QAction("OCR识别（切片量测）", self, triggered=self.add_ocr_mapping)
+            if not ocr_available():
+                ocr_action.setEnabled(False)
+                ocr_action.setToolTip("PaddleOCR 未安装，请运行 pip install paddlepaddle paddleocr")
+            menu.addAction(ocr_action)
         if self.template_wb and self._version_header_cells(
                 self.template_wb[self.current_sheet_name]):
             menu.addSeparator()
@@ -1015,6 +1023,95 @@ class MainWindow(QMainWindow, MappingOperations, TableZoomMixin):
             self.mappings.append(mapping)
             self.refresh_mapping_list()
 
+    # ==================== OCR 切片量测 ====================
+    def add_ocr_mapping(self):
+        """右键 → OCR识别（切片量测）：弹出配置对话框，创建 OCR 映射。"""
+        if not ocr_available():
+            QMessageBox.warning(self, "OCR 不可用",
+                "PaddleOCR 未安装。请运行: pip install paddlepaddle paddleocr")
+            return
+
+        dlg = OCRSetupDialog(self)
+        if dlg.exec_() != QDialog.Accepted:
+            return
+
+        mapping = dlg.get_ocr_mapping()
+        mapping['target_sheet'] = self.current_sheet_name
+
+        # 自动计算 target_cells：按选中的单元格区域展开
+        img_count = dlg.get_selected_count()
+        labels = dlg.get_labels()
+        mode = mapping['mode']
+
+        if mode == 'labeled' and labels:
+            # 多值模式：每张图一行，每标签占一列
+            cell_count = img_count * len(labels)
+            if self.current_selection:
+                t_min_row, t_min_col, t_max_row, t_max_col = self.current_selection
+                selected_cells = (t_max_row - t_min_row + 1) * (t_max_col - t_min_col + 1)
+                if selected_cells == cell_count:
+                    # 完美匹配：按行展开（每张图一行，每标签一列）
+                    mapping['target_cells'] = []
+                    cols_per_row = len(labels)
+                    for i in range(img_count):
+                        row = t_min_row + i
+                        cells = []
+                        for j in range(cols_per_row):
+                            col = t_min_col + j
+                            cells.append([row, col])
+                        mapping['target_cells'].append(cells)
+                elif selected_cells == img_count:
+                    # 只选了单列：每张图一个单元格，取第一个标签值
+                    mapping['target_cells'] = []
+                    for i in range(img_count):
+                        row = t_min_row + i
+                        mapping['target_cells'].append([row, t_min_col])
+                    # 降级为单值模式
+                    mapping['mode'] = 'first_number'
+                else:
+                    QMessageBox.warning(self, "单元格数量不匹配",
+                        f"选中了 {selected_cells} 个单元格，但需要 {cell_count} 个"
+                        f"（{img_count} 张图 × {len(labels)} 个标签）。\n\n"
+                        "请重新选择与图像数量匹配的单元格区域。")
+                    return
+            else:
+                QMessageBox.warning(self, "提示",
+                    "请先在报告模板中选中目标单元格区域，再添加 OCR 映射。")
+                return
+        else:
+            # 单值模式：每张图一个单元格
+            if self.current_selection:
+                t_min_row, t_min_col, t_max_row, t_max_col = self.current_selection
+                selected_cells = (t_max_row - t_min_row + 1) * (t_max_col - t_min_col + 1)
+                if selected_cells == img_count:
+                    mapping['target_cells'] = []
+                    for i in range(img_count):
+                        row = t_min_row + i
+                        for j in range(t_max_col - t_min_col + 1):
+                            col = t_min_col + j
+                            mapping['target_cells'].append([row, col])
+                elif selected_cells == 1:
+                    # 只选了一个单元格：所有图的结果填入同一格（不推荐但允许）
+                    row, col = t_min_row, t_min_col
+                    mapping['target_cells'] = [[row, col] for _ in range(img_count)]
+                else:
+                    QMessageBox.warning(self, "单元格数量不匹配",
+                        f"选中了 {selected_cells} 个单元格，但有 {img_count} 张图像。\n\n"
+                        "请确保选中单元格数等于图像数（单值模式）或 "
+                        "图像数 × 标签数（多值模式）。")
+                    return
+            else:
+                QMessageBox.warning(self, "提示",
+                    "请先在报告模板中选中目标单元格区域，再添加 OCR 映射。")
+                return
+
+        self.mappings.append(mapping)
+        self.refresh_mapping_list()
+        QMessageBox.information(self, "OCR 映射已添加",
+            f"已添加 OCR 映射：{img_count} 张图片 → "
+            f"{len(mapping['target_cells'])} 个目标单元格\n"
+            f"模式: {mode} | 预处理: {mapping.get('preprocess', 'none')}")
+
     # ==================== 映射列表刷新 ====================
     def refresh_mapping_list(self):
         self.mapping_list.clear()
@@ -1036,6 +1133,13 @@ class MainWindow(QMainWindow, MappingOperations, TableZoomMixin):
             elif m['type'] == 'jmp':
                 headers_str = ','.join(m['header_cols'])
                 desc += f"JMP: 锚点{m['anchor_cell']} <- {m['source_sheet']}!{m['source_range']} (表头:{headers_str} 拼接:{m['merge_columns']})"
+            elif m['type'] == 'ocr':
+                img_count = len(m.get('image_list', []))
+                mode = m.get('mode', '?')
+                labels_str = ','.join(m.get('labels', []))
+                mode_desc = {'first_number': '单值', 'labeled': f'多值({labels_str})',
+                            'all_numbers': '全部数值', 'custom': '自定义'}.get(mode, mode)
+                desc += f"OCR: {mode_desc} <- {img_count}张切片 (预处理:{m.get('preprocess','none')})"
             item = QListWidgetItem(desc)
             item.setData(Qt.UserRole, next(i for i, x in enumerate(self.mappings) if x is m))
             self.mapping_list.addItem(item)

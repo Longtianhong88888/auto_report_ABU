@@ -23,11 +23,41 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r requirements.txt pyinstaller
 
+    - name: Pre-download PaddleOCR models
+      shell: pwsh
+      run: |
+        # 初始化 PaddleOCR 触发模型下载（仅需检测+识别两个模型）
+        python -c "
+        import os
+        # 模型下载到项目目录
+        os.environ['PADDLEX_HOME'] = os.path.join(os.getcwd(), 'paddleocr_models')
+        from paddleocr import PaddleOCR
+        ocr = PaddleOCR(lang='en',
+                        use_doc_orientation_classify=False,
+                        use_doc_unwarping=False,
+                        use_textline_orientation=False)
+        # 跑一次 warm-up 确保模型完全加载
+        import numpy as np
+        dummy = np.zeros((100, 200, 3), dtype='uint8')
+        ocr.ocr(dummy)
+        print('Models downloaded OK')
+        "
+        # 删除不需要的预处理模型（减小包体积）
+        $official = 'paddleocr_models\official_models'
+        $keep = @('PP-OCRv6_medium_det', 'PP-OCRv6_medium_rec')
+        Get-ChildItem $official -Directory | Where-Object { $_.Name -notin $keep } | Remove-Item -Recurse -Force
+        Write-Output "Model size:"
+        Get-ChildItem $official -Recurse -File | Measure-Object -Property Length -Sum | ForEach-Object { "{0:N0} MB" -f ($_.Sum / 1MB) }
+
     - name: Build directory package
       shell: pwsh
       run: |
         # 目录打包，启动极快
-        pyinstaller --windowed --icon=app_icon.ico --add-data "splash.png;." --add-data "app_icon.ico;." main.py
+        pyinstaller --windowed --icon=app_icon.ico `
+          --add-data "splash.png;." `
+          --add-data "app_icon.ico;." `
+          --add-data "paddleocr_models;paddleocr_models" `
+          main.py
         # 压缩输出目录
         Compress-Archive -Path dist\main\* -DestinationPath dist\auto_report.zip
 

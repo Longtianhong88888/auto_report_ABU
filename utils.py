@@ -67,5 +67,28 @@ def normalize_mappings(mappings):
         for field in ('block_range', 'target_range'):
             if field in m and isinstance(m[field], list):
                 m[field] = tuple(m[field])
+        if mtype == 'ocr':
+            # target_cells: list of [row,col] → list of (row, col)
+            tc = m.get('target_cells')
+            if isinstance(tc, list):
+                m['target_cells'] = [
+                    [tuple(c) if isinstance(c, list) else c for c in row]
+                    if isinstance(row, list) else row
+                    for row in tc
+                ]
+            # labels: ensure list
+            if isinstance(m.get('labels'), str):
+                m['labels'] = [m['labels']]
+            # roi: ensure tuple or None
+            roi = m.get('roi')
+            if isinstance(roi, list):
+                m['roi'] = tuple(roi)
+            # label_rois: ensure values are tuples
+            lr = m.get('label_rois')
+            if isinstance(lr, dict):
+                m['label_rois'] = {
+                    k: tuple(v) if isinstance(v, list) else v
+                    for k, v in lr.items()
+                }
         result.append(m)
     return result

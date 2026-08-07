@@ -18,3 +18,12 @@ DEFAULT_AUTHORIZED_USER_IDS = [
 # 管理员工号与授权密码
 ADMIN_USER_ID = 'G1659304'
 ADMIN_AUTH_PASSWORD = 'Zy1659304'
+
+# ================== OCR 常量 ==================
+OCR_DEFAULT_LANG = 'ch'
+OCR_DEFAULT_CONFIDENCE_THRESHOLD = 0.5
+OCR_SUPPORTED_LANGS = ['ch', 'en']
+OCR_EXTRACTION_MODES = ['first_number', 'labeled', 'all_numbers', 'custom']
+OCR_PREPROCESS_OPTIONS = ['none', 'grayscale', 'otsu', 'stretch', 'stretch_invert']
+OCR_MAX_IMAGE_DIMENSION_FOR_PREVIEW = 1200
+OCR_PREVIEW_COUNT = 3  # 预览时默认跑前 N 张图

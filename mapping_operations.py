@@ -36,6 +36,10 @@ class MappingOperations:
             return ('image', m.get('target_sheet'), m.get('anchor_cell'))
         if t == 'jmp':
             return ('jmp', m.get('target_sheet'), m.get('anchor_cell'))
+        if t == 'ocr':
+            return ('ocr', m.get('target_sheet'), m.get('mode'),
+                    m.get('image_folder'), tuple(m.get('image_list', [])),
+                    repr(m.get('target_cells')), tuple(m.get('labels', [])))
         return (t, id(m))
     def _dedupe_mappings(self, mappings):
         """按映射去重键过滤重复项，保留首次出现"""
@@ -108,6 +112,8 @@ class MappingOperations:
             self.apply_archive_shift_right(ws, mapping, data_ws, data_src_ws)
         elif mapping['type'] == 'jmp':
             self.apply_jmp_mapping(ws, mapping, jmp_src_ws)
+        elif mapping['type'] == 'ocr':
+            self.apply_ocr_mapping(ws, mapping)
     def _resolve_data_src_ws(self, mapping, data_source_wb):
         """按映射的 source_sheet 从数据源文件解析工作表（优先 data_only 版本）"""
         src_sheet = mapping.get('source_sheet')
@@ -409,6 +415,108 @@ class MappingOperations:
                     ref_cell = ws.cell(row=ref_row, column=col_idx)
                     target_cell = ws.cell(row=current_row, column=col_idx)
                     self.copy_cell_style(ref_cell, target_cell)
+    def apply_ocr_mapping(self, ws, mapping):
+        """执行 OCR 映射：对每张切片图像做 OCR，将提取的量测值写入目标单元格。
+
+        支持 single（单值）和 labeled（多标注值）两种模式。
+        OCR 失败的单元格保留为空并记录 warning。
+        """
+        import os as _os
+        from PyQt5.QtWidgets import QApplication
+        from ocr_engine import ocr_batch
+
+        image_folder = mapping.get('image_folder', '')
+        image_list = mapping.get('image_list', [])
+        mode = mapping.get('mode', 'first_number')
+        labels = mapping.get('labels')
+        roi = mapping.get('roi')
+        preprocess = mapping.get('preprocess', 'none')
+        lang = mapping.get('lang', 'ch')
+        expr = mapping.get('expr', '')
+        target_cells = mapping.get('target_cells', [])
+
+        # 构建绝对路径
+        image_paths = [_os.path.join(image_folder, p) for p in image_list]
+
+        # 检查文件是否存在
+        missing = [p for p in image_paths if not _os.path.exists(p)]
+        if missing:
+            self._fill_warnings.append(
+                f"OCR 映射（{ws.title}）：{len(missing)}/{len(image_paths)} 个文件缺失，"
+                f"如 {_os.path.basename(missing[0])}")
+
+        # 执行批量 OCR
+        try:
+            def _tick(cur, total):
+                # 批量 OCR 期间刷新进度弹窗，避免界面看起来卡死
+                QApplication.processEvents()
+            results = ocr_batch(
+                image_paths, roi=roi, preprocess=preprocess, lang=lang,
+                mode=mode if mode != 'labeled' else 'labeled',
+                labels=labels, expr=expr, progress_callback=_tick)
+        except Exception as e:
+            self._fill_warnings.append(
+                f"OCR 批量识别失败（{ws.title}）：{e}")
+            return
+
+        # 写入目标单元格
+        for idx, result in enumerate(results):
+            img_name = result.get('_image', '?')
+            if '_error' in result:
+                err = result['_error']
+                self._fill_warnings.append(
+                    f"OCR 失败 {img_name}：{err}")
+                continue
+
+            if idx >= len(target_cells):
+                break
+
+            tc = target_cells[idx]
+
+            if mode == 'labeled' and labels:
+                # 多值模式：每张图对应一行 target_cells（list of [row,col]）
+                if isinstance(tc, list) and len(tc) > 0 and isinstance(tc[0], (list, tuple)):
+                    for li, label in enumerate(labels):
+                        if li >= len(tc):
+                            break
+                        row, col = tc[li][0], tc[li][1]
+                        val = result.get(label)
+                        cell_addr = f"{ws.title}!{get_column_letter(col)}{row}"
+                        if val is None:
+                            self._fill_warnings.append(
+                                f"{cell_addr} <- {img_name}/{label}：未识别到数值")
+                        ws.cell(row=row, column=col).value = val
+                elif isinstance(tc, (list, tuple)) and len(tc) >= 1:
+                    # 单行模式：取第一个标签值写入单个单元格
+                    row, col = tc[0], tc[1]
+                    first_label = labels[0] if labels else None
+                    val = result.get(first_label) if first_label else result.get('value')
+                    ws.cell(row=row, column=col).value = val
+            else:
+                # 单值/全部数值/自定义模式：每张图对应一个 target_cell
+                if isinstance(tc, (list, tuple)):
+                    row, col = tc[0], tc[1]
+                else:
+                    row, col = tc, tc  # fallback, shouldn't happen
+                cell_addr = f"{ws.title}!{get_column_letter(col)}{row}"
+                if mode == 'all_numbers':
+                    vals = result.get('values', [])
+                    if not vals:
+                        self._fill_warnings.append(
+                            f"{cell_addr} <- {img_name}：未识别到数值")
+                    elif len(vals) == 1:
+                        ws.cell(row=row, column=col).value = vals[0]
+                    else:
+                        # 多个数值：目标只有单格时以逗号拼接写入
+                        ws.cell(row=row, column=col).value = \
+                            ', '.join(str(v) for v in vals)
+                else:
+                    val = result.get('value')
+                    if val is None:
+                        self._fill_warnings.append(
+                            f"{cell_addr} <- {img_name}：未识别到数值")
+                    ws.cell(row=row, column=col).value = val
+
     @staticmethod
     def copy_cell_style(src, dst):
         if src.has_style:
