@@ -41,6 +41,7 @@
   - 解析失败字段跳过更新，弹窗提示“请在报告中手动修改”，弹窗会列出已查找的文件夹
 - 默认输出文件名：沿用模板文件名格式，替换 Configuration（`C\d{4}`）与 Event（`MBO|PBO`）段，不含 Build Phase；保存对话框预填，其余由用户自行修改
 - 所有报表预览表格支持缩放：Ctrl+滚轮（Windows）与 Mac 触控板双指捏合（`TableZoomMixin`，table_zoom.py），同步缩放列宽/行高/字体，事件 50ms 合并防卡顿；应用于主预览表与 SourceSelectDialog
+- 表格支持 Ctrl+Shift+方向键按 Excel 习惯快速扩展选区（连续非空/空段边界）；活动格用 `selectionModel().setCurrentIndex(..., NoUpdate)` 设置，避免塌缩选区
 
 ### 配置体系（2026-08 重构后）
 - 打开模板**不再自动加载**配置；`self.mappings` 初始为空

@@ -1,9 +1,10 @@
-"""表格缩放混入。
+"""表格缩放与快速选区混入。
 
 给 QTableWidget 增加 Ctrl+滚轮 / Mac 触控板双指捏合缩放：
-同步缩放列宽、行高与单元格字体。事件 50ms 合并，避免快速操作卡顿。
+同步缩放列宽、行高与单元格字体（事件 50ms 合并，避免卡顿）；
+以及 Ctrl+Shift+方向键按 Excel 习惯快速扩展选区。
 """
-from PyQt5.QtCore import Qt, QEvent, QTimer
+from PyQt5.QtCore import Qt, QEvent, QTimer, QItemSelection, QItemSelectionModel
 
 
 class TableZoomMixin:
@@ -19,6 +20,7 @@ class TableZoomMixin:
         self._zoom_timer = QTimer(self)
         self._zoom_timer.setSingleShot(True)
         self._zoom_timer.timeout.connect(self._zoom_apply)
+        table.installEventFilter(self)
         viewport = table.viewport()
         viewport.installEventFilter(self)
         viewport.grabGesture(Qt.PinchGesture)
@@ -61,7 +63,16 @@ class TableZoomMixin:
 
     def eventFilter(self, obj, event):
         table = getattr(self, '_zoom_table', None)
-        if table is not None and obj is table.viewport():
+        if table is None:
+            return False
+        if obj is table and event.type() == QEvent.KeyPress:
+            if (event.modifiers() & Qt.ControlModifier
+                    and event.modifiers() & Qt.ShiftModifier
+                    and event.key() in (Qt.Key_Right, Qt.Key_Left,
+                                        Qt.Key_Up, Qt.Key_Down)):
+                self._extend_selection(event.key())
+                return True
+        elif obj is table.viewport():
             if event.type() == QEvent.Wheel:
                 if event.modifiers() & Qt.ControlModifier:
                     delta = event.angleDelta().y()
@@ -78,3 +89,77 @@ class TableZoomMixin:
         # 混入类在 MRO 中位于 Qt 类之后，super() 没有 eventFilter；
         # 事件过滤器默认放行（返回 False）即可
         return False
+
+    @staticmethod
+    def _cell_has_content(table, row, col):
+        if row < 0 or col < 0 or row >= table.rowCount() or col >= table.columnCount():
+            return False
+        item = table.item(row, col)
+        return item is not None and item.text().strip() != ""
+
+    def _extend_selection(self, key):
+        """Ctrl+Shift+方向键：按 Excel 习惯把选区扩展到数据边界
+        （连续非空段或连续空段，直到下一个边界/表格边缘）。"""
+        table = self._zoom_table
+        model = table.model()
+        row = table.currentRow()
+        col = table.currentColumn()
+        if row < 0 or col < 0:
+            return
+        nrows = table.rowCount()
+        ncols = table.columnCount()
+
+        r1, c1 = row, col
+        r2, c2 = row, col
+        if key == Qt.Key_Right:
+            c = col + 1
+            if c < ncols and self._cell_has_content(table, row, c):
+                while c < ncols and self._cell_has_content(table, row, c):
+                    c += 1
+                c2 = c - 1
+            else:
+                while c < ncols and not self._cell_has_content(table, row, c):
+                    c += 1
+                c2 = c - 1
+        elif key == Qt.Key_Left:
+            c = col - 1
+            if c >= 0 and self._cell_has_content(table, row, c):
+                while c >= 0 and self._cell_has_content(table, row, c):
+                    c -= 1
+                c2 = c + 1
+            else:
+                while c >= 0 and not self._cell_has_content(table, row, c):
+                    c -= 1
+                c2 = c + 1
+        elif key == Qt.Key_Down:
+            r = row + 1
+            if r < nrows and self._cell_has_content(table, r, col):
+                while r < nrows and self._cell_has_content(table, r, col):
+                    r += 1
+                r2 = r - 1
+            else:
+                while r < nrows and not self._cell_has_content(table, r, col):
+                    r += 1
+                r2 = r - 1
+        elif key == Qt.Key_Up:
+            r = row - 1
+            if r >= 0 and self._cell_has_content(table, r, col):
+                while r >= 0 and self._cell_has_content(table, r, col):
+                    r -= 1
+                r2 = r + 1
+            else:
+                while r >= 0 and not self._cell_has_content(table, r, col):
+                    r -= 1
+                r2 = r + 1
+        else:
+            return
+
+        r2 = max(0, min(r2, nrows - 1))
+        c2 = max(0, min(c2, ncols - 1))
+        if (r2, c2) == (r1, c1):
+            return
+        sm = table.selectionModel()
+        sm.select(QItemSelection(model.index(r1, c1), model.index(r2, c2)),
+                  QItemSelectionModel.ClearAndSelect)
+        # 用 NoUpdate 设置活动格（选区末端），避免塌缩刚选中的范围
+        sm.setCurrentIndex(model.index(r2, c2), QItemSelectionModel.NoUpdate)
