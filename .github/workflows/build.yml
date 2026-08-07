@@ -57,6 +57,10 @@ jobs:
           --add-data "splash.png;." `
           --add-data "app_icon.ico;." `
           --add-data "paddleocr_models;paddleocr_models" `
+          --collect-all paddle `
+          --collect-all paddleocr `
+          --collect-all paddlex `
+          --collect-all cv2 `
           main.py
         # 压缩输出目录
         Compress-Archive -Path dist\main\* -DestinationPath dist\auto_report.zip

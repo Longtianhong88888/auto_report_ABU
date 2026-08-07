@@ -85,7 +85,8 @@
 - openpyxl 保存后图片 `ref` 会被关闭 → 用 `_snapshot_template_images` / `_refresh_image_refs` 重建
 - `generate_acf_report.py` 已从磁盘删除（README 已更新，代码无引用）
 - 本地 `authorized_ids.json` 当前含 G1653332/G1655895/G1659304（不入库，gitignore 已忽略）
-- OCR 功能：本机 venv 尚未成功安装 paddlepaddle/paddleocr（需 `pip install -r requirements.txt` 或手动安装），`ocr_available()` 为 False 时菜单禁用；requirements 已锁 `paddlepaddle/paddleocr>=3.0,<4.0`；CI 在 Windows 上预下载 PP-OCRv6 det/rec 模型并打包（`paddleocr_models/` 已 gitignore）
+- OCR 功能：本机 venv 已装好 paddlepaddle 3.3.1 / paddleocr 3.7.0 / paddlex 3.7.2（`pip install -r requirements.txt`），OCR 引擎实测可用（内置 PP-OCRv6 模型，5s 识别 155.76/2.30 全对）；requirements 锁 `paddlepaddle/paddleocr>=3.0,<4.0`
+- Windows 打包为“解压即用”：build.yml 用 `--collect-all paddle/paddleocr/paddlex/cv2` 收集全部依赖 + `--add-data paddleocr_models` 内置模型，zip 解压后无需安装任何东西
 - OCR 已知限制：按标签独立 ROI（label_rois / ocr_batch_with_rois）尚未在对话框/输出中接入；输出阶段 OCR 同步执行（已加 processEvents 刷新进度，未做线程化）
 
 ## 七、测试与交付
