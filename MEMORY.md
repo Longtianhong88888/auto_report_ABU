@@ -27,6 +27,8 @@
 | `ocr_engine.py` | OCR 引擎：PaddleOCR 懒加载单例（兼容 ocr()/predict()）、预处理、数值提取 |
 | `ocr_worker.py` | OCR 后台线程（对话框预览用） |
 | `ocr_dialog.py` | OCR 切片量测配置对话框（ROI 框选、预览、表达式） |
+| `ui_theme.py` | Apple 风格 UI 设计体系（QSS/颜色/间距/窗口尺寸，移植自 MC_LogAnalysis） |
+| `user_guide.py` | 应用内「使用说明」对话框（HTML 内容） |
 | `constants.py` | 尺寸常量、默认授权工号、管理员与密码 |
 
 ## 三、核心业务流程
@@ -96,3 +98,13 @@
 - 测试用小模板（如 `/tmp/small_tpl.xlsx`）避免大文件卡顿
 - 说明书：`使用说明书_自动MPBO报告工具.pptx`（15 页，截图 + 文字；原始截图在 `manual_shots/`）
 - Windows 版：GitHub Actions 构建，Actions 页面下载 `auto_report_package`
+
+## 八、界面（Apple 风格，2026-08-08 移植自 MC_LogAnalysis）
+
+- QSS 卡片式：背景 `#F5F5F7`、卡片白、主色 `#007AFF`（`ui_theme.py` 的 `APPLE_QSS`）；`main.py` 里 `app.setStyleSheet(APPLE_QSS)` 全局生效（主窗口 + 所有对话框统一），主窗口再设一份同款样式
+- 窗口尺寸改为按屏幕可用区域 **80%** 动态计算（`window_target_size`，最小 900×620），替换原固定 `setGeometry(1400, 850)`
+- 三个面板（报告Sheet列表 / 预览表 / 映射列表）均为白色圆角卡片（`setProperty("card", True)` + `CARD_PAD` 内边距）；顶部按钮行右侧新增「使用说明」链接按钮（`user_guide.py` 对话框，`show_user_guide`）
+- 主按钮「打开报告文件」为实心蓝（`primary`）、「打开IPQC数据源文件」为浅灰次按钮（`secondary`）
+- 启动画面：与主窗口同尺寸（splash.png **cover 裁切**填满），最短展示 1000ms，`FADE_MS=300` 淡出衔接主窗口；登录对话框在淡出结束后弹出（`_crossfade(on_finished=start_login)`），`_ANIMS` 持有动画引用防提前回收
+- `AA_EnableHighDpiScaling` / `AA_UseHighDpiPixmaps` 在 QApplication 创建前设置（原有，保留）；版权仍在状态栏右下角（灰色 11px，`Copyright © 2026 ABU NPD EOL`）
+- 注意：QSS 的 `QWidget{font-size:13px}` 与表格缩放功能不冲突（缩放用显式 item 字体）；离屏测试时透明度动画提示 "plugin does not support setting window opacity" 属环境限制，真机正常

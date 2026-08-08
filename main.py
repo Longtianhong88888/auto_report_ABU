@@ -4,6 +4,7 @@ import os
 import io
 import re
 import datetime
+import time
 import traceback
 import xml.etree.ElementTree as ET
 
@@ -15,7 +16,7 @@ from PyQt5.QtWidgets import (
     QDialog, QProgressDialog, QInputDialog, QLineEdit, QPlainTextEdit,
 )
 from PyQt5.QtGui import QColor, QFont, QIcon, QPixmap, QPainter, QPalette
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import QEasingCurve, QPropertyAnimation, QTimer, Qt
 import openpyxl
 from openpyxl.utils import range_boundaries, get_column_letter, column_index_from_string
 from openpyxl.styles.colors import COLOR_INDEX
@@ -37,6 +38,11 @@ from mapping_operations import MappingOperations
 from version_finder import suggest_files
 from table_zoom import TableZoomMixin
 from utils import column_width_chars, apply_uniform_sizes, normalize_mappings
+from ui_theme import (
+    APPLE_QSS, CARD_PAD, C_SUB, GAP_SECTION, WINDOW_MIN_SIZE,
+    window_target_size,
+)
+from user_guide import show_user_guide
 
 
 def resource_path(relative_path):
@@ -65,7 +71,11 @@ class MainWindow(QMainWindow, MappingOperations, TableZoomMixin):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("自动M/PBO报告制作软件")
-        self.setGeometry(100, 100, 1400, 850)
+        # Apple 风格：主窗口按屏幕可用区域 80% 动态计算，最小 900×620
+        w, h = window_target_size()
+        self.resize(w, h)
+        self.setMinimumSize(*WINDOW_MIN_SIZE)
+        self.setStyleSheet(APPLE_QSS)
 
         self.template_wb = None
         self.source_wb = None
@@ -87,13 +97,17 @@ class MainWindow(QMainWindow, MappingOperations, TableZoomMixin):
         central = QWidget()
         self.setCentralWidget(central)
         main_layout = QHBoxLayout(central)
+        main_layout.setContentsMargins(16, 12, 16, 12)
+        main_layout.setSpacing(GAP_SECTION)
 
         # Sheet面板
         sheet_panel = QWidget()
+        sheet_panel.setProperty("card", True)
         sheet_layout = QVBoxLayout(sheet_panel)
-        sheet_layout.setContentsMargins(5, 5, 5, 5)
+        sheet_layout.setContentsMargins(CARD_PAD, CARD_PAD, CARD_PAD, CARD_PAD)
+        sheet_layout.setSpacing(6)
         sheet_label = QLabel("报告Sheet列表")
-        sheet_label.setStyleSheet("font-weight: bold;")
+        sheet_label.setProperty("heading", True)
         sheet_layout.addWidget(sheet_label)
         self.sheet_list = QListWidget()
         self.sheet_list.itemClicked.connect(self.on_sheet_clicked)
@@ -101,14 +115,26 @@ class MainWindow(QMainWindow, MappingOperations, TableZoomMixin):
 
         # 中间
         center_widget = QWidget()
+        center_widget.setProperty("card", True)
         center_layout = QVBoxLayout(center_widget)
+        center_layout.setContentsMargins(CARD_PAD, CARD_PAD, CARD_PAD, CARD_PAD)
+        center_layout.setSpacing(6)
         btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(6)
         self.btn_open_template = QPushButton("打开报告文件")
+        self.btn_open_template.setProperty("primary", True)
         self.btn_open_template.clicked.connect(self.open_template)
         btn_layout.addWidget(self.btn_open_template)
         self.btn_open_source = QPushButton("打开IPQC数据源文件")
+        self.btn_open_source.setProperty("secondary", True)
         self.btn_open_source.clicked.connect(self.open_source)
         btn_layout.addWidget(self.btn_open_source)
+        btn_layout.addStretch()
+        guide_btn = QPushButton("使用说明")
+        guide_btn.setProperty("link", True)
+        guide_btn.setToolTip("查看软件使用说明")
+        guide_btn.clicked.connect(self.show_user_guide)
+        btn_layout.addWidget(guide_btn)
         center_layout.addLayout(btn_layout)
         self.table = QTableWidget()
         self.table.setSelectionMode(QAbstractItemView.ContiguousSelection)
@@ -125,8 +151,13 @@ class MainWindow(QMainWindow, MappingOperations, TableZoomMixin):
 
         # 右侧
         right_widget = QWidget()
+        right_widget.setProperty("card", True)
         right_layout = QVBoxLayout(right_widget)
-        right_layout.addWidget(QLabel("当前Sheet映射列表"))
+        right_layout.setContentsMargins(CARD_PAD, CARD_PAD, CARD_PAD, CARD_PAD)
+        right_layout.setSpacing(6)
+        mapping_label = QLabel("当前Sheet映射列表")
+        mapping_label.setProperty("heading", True)
+        right_layout.addWidget(mapping_label)
         self.mapping_list = QListWidget()
         self.mapping_list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.mapping_list.customContextMenuRequested.connect(self.show_mapping_context_menu)
@@ -157,7 +188,15 @@ class MainWindow(QMainWindow, MappingOperations, TableZoomMixin):
         main_layout.addWidget(splitter)
 
         # 底部版权信息
-        self.statusBar().addPermanentWidget(QLabel("Copyright © 2026 by ABU NPD EOL"))
+        sb = self.statusBar()
+        sb.showMessage("就绪")
+        sb_label = QLabel("Copyright © 2026 ABU NPD EOL")
+        sb_label.setStyleSheet(f"color: {C_SUB}; font-size: 11px;")
+        sb.addPermanentWidget(sb_label)
+
+    def show_user_guide(self):
+        """右上角「使用说明」：应用内帮助对话框。"""
+        show_user_guide(self)
 
     # ==================== 文件加载 ====================
     def open_template(self):
@@ -1648,6 +1687,55 @@ class AuthorizeIdDialog(QDialog):
 
 
 
+SPLASH_MIN_MS = 1000  # 启动画面最短展示时间
+FADE_MS = 300         # 淡出过渡时长（Apple 风格，平滑衔接主窗口）
+_ANIMS = set()        # 持有运行中的动画引用，防止被提前回收
+
+
+def create_splash(target_size=None):
+    """按 splash.png 生成启动画面，尺寸与主窗口一致（cover 裁切填满）。"""
+    pixmap = QPixmap(resource_path('splash.png'))
+    if pixmap.isNull():
+        # 备用：纯白背景 + 文字
+        w, h = target_size or window_target_size()
+        pixmap = QPixmap(w, h)
+        pixmap.fill(Qt.white)
+        painter = QPainter(pixmap)
+        painter.setFont(QFont('Arial', 20))
+        painter.drawText(pixmap.rect(), Qt.AlignCenter, "自动报告工具")
+        painter.end()
+        return QSplashScreen(pixmap)
+    w, h = target_size or window_target_size()
+    img = pixmap.toImage()
+    scale = max(w / img.width(), h / img.height())
+    sw, sh = int(img.width() * scale), int(img.height() * scale)
+    img = img.scaled(sw, sh, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+    x = max(0, (sw - w) // 2)
+    y = max(0, (sh - h) // 2)
+    img = img.copy(x, y, w, h)
+    return QSplashScreen(QPixmap.fromImage(img))
+
+
+def _crossfade(splash, window, duration=FADE_MS, on_finished=None):
+    """启动画面平滑淡出，露出下方已就绪的主窗口，避免生硬切换。"""
+    fade_out = QPropertyAnimation(splash, b"windowOpacity")
+    fade_out.setDuration(duration)
+    fade_out.setStartValue(1.0)
+    fade_out.setEndValue(0.0)
+    fade_out.setEasingCurve(QEasingCurve.InOutQuad)
+    _ANIMS.add(fade_out)
+
+    def _finish():
+        splash.hide()
+        splash.finish(window)
+        _ANIMS.discard(fade_out)
+        if on_finished:
+            on_finished()
+
+    fade_out.finished.connect(_finish)
+    fade_out.start()
+
+
 if __name__ == '__main__':
     # Windows 高分屏适配（必须在 QApplication 创建前设置）
     if hasattr(Qt, 'AA_EnableHighDpiScaling'):
@@ -1656,33 +1744,41 @@ if __name__ == '__main__':
         QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
 
     app = QApplication(sys.argv)
-    app.setWindowIcon(QIcon(resource_path('app_icon.ico')))  # 图标也用 resource_path
+    app.setApplicationName("自动M/PBO报告制作软件")
+    # Apple 风格全局样式（主窗口 + 所有对话框统一）
+    app.setStyleSheet(APPLE_QSS)
+    icon = QIcon(resource_path('app_icon.ico'))
+    if not icon.isNull():
+        app.setWindowIcon(icon)
 
-    # 启动画面
-    splash_pix = QPixmap(resource_path('splash.png'))   # ← 关键修改
-    if not splash_pix.isNull():
-        splash_pix = splash_pix.scaledToWidth(1600, Qt.SmoothTransformation)
-    else:
-        # 备用：纯白背景 + 文字
-        splash_pix = QPixmap(400, 200)
-        splash_pix.fill(Qt.white)
-        painter = QPainter(splash_pix)
-        painter.setFont(QFont('Arial', 20))
-        painter.drawText(splash_pix.rect(), Qt.AlignCenter, "自动报告工具")
-        painter.end()
-
-    splash = QSplashScreen(splash_pix)
-    splash.show()
-    splash.showMessage("正在启动...", Qt.AlignBottom | Qt.AlignCenter, Qt.black)
-    app.processEvents()
+    # 启动画面：与主窗口同尺寸（cover 裁切），最短展示后淡出
+    splash_start = time.monotonic()
+    splash = create_splash()
+    if splash is not None:
+        splash.show()
+        splash.showMessage(
+            "正在启动 自动M/PBO报告制作软件 ...",
+            Qt.AlignBottom | Qt.AlignCenter,
+            Qt.white,
+        )
+        app.processEvents()
 
     window = MainWindow()
-    splash.finish(window)
+    if not icon.isNull():
+        window.setWindowIcon(icon)
     window.show()
 
-    # 用户工号验证：以主界面为背景，通过后才可使用软件功能
-    login = UserIdDialog(window)
-    if login.exec_() != QDialog.Accepted:
-        sys.exit(0)
+    def start_login():
+        # 用户工号验证：以主界面为背景，通过后才可使用软件功能
+        login = UserIdDialog(window)
+        if login.exec_() != QDialog.Accepted:
+            sys.exit(0)
+
+    if splash is not None:
+        elapsed_ms = int((time.monotonic() - splash_start) * 1000)
+        remaining_ms = max(0, SPLASH_MIN_MS - elapsed_ms)
+        QTimer.singleShot(remaining_ms, lambda: _crossfade(splash, window, on_finished=start_login))
+    else:
+        start_login()
 
     sys.exit(app.exec_())
