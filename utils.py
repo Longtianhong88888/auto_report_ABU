@@ -1,9 +1,13 @@
 """公共工具：列宽解析、表格统一尺寸、映射配置标准化。"""
+import io
+
 from openpyxl.utils import get_column_letter
+from PIL import Image as PILImage
 
 from constants import (
     COL_WIDTH_PX_PER_CHAR, ROW_HEIGHT_PX_PER_PT,
     DEFAULT_COL_WIDTH_CHARS, DEFAULT_ROW_HEIGHT_PTS,
+    IMAGE_JPEG_QUALITY, IMAGE_THUMB_MAX_SIDE,
 )
 
 
@@ -64,7 +68,7 @@ def normalize_mappings(mappings):
                 m['header_cols'] = [str(h) for h in headers]
             else:
                 m['header_cols'] = []
-        for field in ('block_range', 'target_range'):
+        for field in ('block_range', 'target_range', 'clear_region'):
             if field in m and isinstance(m[field], list):
                 m[field] = tuple(m[field])
         if mtype == 'ocr':
@@ -92,3 +96,38 @@ def normalize_mappings(mappings):
                 }
         result.append(m)
     return result
+
+
+def make_image_thumbnail(img_data, max_side=IMAGE_THUMB_MAX_SIDE,
+                         quality=IMAGE_JPEG_QUALITY):
+    """把图片字节解码并等比压缩为 JPEG 缩略图字节，供预览使用。
+
+    预览时如果直接 QPixmap.loadFromData 原图，超大显微镜图会全图解码，
+    图片多时界面卡死、内存暴涨；这里先压成小 JPEG，预览只解码缩略图。
+    失败返回 None，调用方回退到原图预览。
+    """
+    try:
+        PILImage.MAX_IMAGE_PIXELS = None
+        img = PILImage.open(io.BytesIO(img_data))
+        w, h = img.size
+        longest = max(w, h)
+        if longest > max_side:
+            scale = max_side / float(longest)
+            new_w = max(1, int(round(w * scale)))
+            new_h = max(1, int(round(h * scale)))
+            img = img.resize((new_w, new_h), PILImage.LANCZOS)
+        # JPEG 不支持透明通道，透明图先贴白底
+        has_alpha = (img.mode in ('RGBA', 'LA')
+                     or (img.mode == 'P' and 'transparency' in img.info))
+        if has_alpha:
+            rgba = img.convert('RGBA')
+            bg = PILImage.new('RGB', rgba.size, (255, 255, 255))
+            bg.paste(rgba, mask=rgba.split()[3])
+            img = bg
+        else:
+            img = img.convert('RGB')
+        out = io.BytesIO()
+        img.save(out, format='JPEG', quality=quality, optimize=True)
+        return out.getvalue()
+    except Exception:
+        return None
