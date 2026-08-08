@@ -165,7 +165,8 @@ QComboBox:focus {{
 QComboBox::drop-down {{
     subcontrol-origin: padding;
     subcontrol-position: top right;
-    width: 28px;
+    /* 与数字框右侧增减按钮等宽（18+1px 边框=19px），保证同排输入框右侧按钮对齐 */
+    width: 18px;
     border: none;
     border-left: 1px solid {C_BORDER};
     border-top-right-radius: 6px;

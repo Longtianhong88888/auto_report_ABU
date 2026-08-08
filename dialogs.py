@@ -4,7 +4,7 @@ from PyQt5.QtWidgets import (
     QFormLayout, QLineEdit, QComboBox, QDialogButtonBox, QAbstractItemView,
     QSpinBox, QGroupBox, QRadioButton, QButtonGroup, QCheckBox, QScrollArea,
     QTableWidget, QTableWidgetItem, QListWidget, QListWidgetItem, QDoubleSpinBox,
-    QProgressBar, QApplication, QFileDialog,
+    QProgressBar, QApplication, QFileDialog, QSizePolicy,
 )
 from PyQt5.QtGui import QIcon, QPixmap
 from PyQt5.QtCore import Qt, QSize, QTimer
@@ -21,48 +21,65 @@ class ImageSetupDialog(QDialog):
     def __init__(self, parent=None, default_col_width=None, default_row_height=None):
         super().__init__(parent)
         self.setWindowTitle("图片设置")
-        layout = QFormLayout(self)
+        self.setFixedWidth(320)
+        root = QVBoxLayout(self)
+        layout = QFormLayout()
+        # 所有输入框共享同一表单列宽（以最宽控件为准），保证文本框长度一致；
+        # 不能只用 FieldsStayAtSizeHint：QComboBox 有全局 QSS min-width:160px，
+        # 数字框默认策略不扩张，会导致下拉框比其它框长一截
+        layout.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
+        input_policy = (QSizePolicy.Expanding, QSizePolicy.Fixed)
+        root.addLayout(layout)
 
         self.col_width = QDoubleSpinBox()
         self.col_width.setRange(1.0, 1000.0)
         self.col_width.setDecimals(1)
         self.col_width.setValue(default_col_width if default_col_width else 8.0)
+        self.col_width.setSizePolicy(*input_policy)
         layout.addRow("列宽(字符):", self.col_width)
 
         self.row_height = QDoubleSpinBox()
         self.row_height.setRange(1.0, 2000.0)
         self.row_height.setDecimals(1)
         self.row_height.setValue(default_row_height if default_row_height else 15.0)
+        self.row_height.setSizePolicy(*input_policy)
         layout.addRow("行高(磅):", self.row_height)
 
         self.rotation = QDoubleSpinBox()
         self.rotation.setRange(-360.0, 360.0)
         self.rotation.setDecimals(1)
         self.rotation.setValue(0.0)
-        layout.addRow("旋转角度(正顺时针):", self.rotation)
+        self.rotation.setSizePolicy(*input_policy)
+        layout.addRow("旋转角度:", self.rotation)
 
         self.width_scale = QDoubleSpinBox()
         self.width_scale.setRange(0.1, 1.0)
         self.width_scale.setSingleStep(0.1)
         self.width_scale.setValue(1.0)
-        layout.addRow("宽度缩放比例:", self.width_scale)
+        self.width_scale.setSizePolicy(*input_policy)
+        layout.addRow("宽度缩放:", self.width_scale)
 
         self.height_scale = QDoubleSpinBox()
         self.height_scale.setRange(0.1, 1.0)
         self.height_scale.setSingleStep(0.1)
         self.height_scale.setValue(1.0)
-        layout.addRow("高度缩放比例:", self.height_scale)
+        self.height_scale.setSizePolicy(*input_policy)
+        layout.addRow("高度缩放:", self.height_scale)
 
         self.alignment = QComboBox()
         self.alignment.addItem("左对齐", "left")
         self.alignment.addItem("居中对齐", "center")
         self.alignment.addItem("右对齐", "right")
+        self.alignment.setSizePolicy(*input_policy)
         layout.addRow("图片对齐:", self.alignment)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
-        layout.addRow(buttons)
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        btn_row.addWidget(buttons)
+        root.addLayout(btn_row)
 
     def get_values(self):
         return (self.col_width.value(), self.row_height.value(),
