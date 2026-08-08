@@ -16,7 +16,7 @@ from PyQt5.QtCore import Qt, QRect, QPoint, QSize, pyqtSignal
 from constants import (
     OCR_DEFAULT_LANG, OCR_SUPPORTED_LANGS,
     OCR_EXTRACTION_MODES, OCR_PREPROCESS_OPTIONS,
-    OCR_MAX_IMAGE_DIMENSION_FOR_PREVIEW, OCR_PREVIEW_COUNT,
+    OCR_PREVIEW_COUNT,
 )
 from ocr_engine import ocr_available
 

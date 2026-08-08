@@ -7,6 +7,10 @@ from openpyxl.utils import range_boundaries, get_column_letter, column_index_fro
 from openpyxl.drawing.image import Image as OpenpyxlImage
 from openpyxl.styles import Border, Side
 from PIL import Image as PILImage
+
+# 本地受信任的高分辨率图片（显微镜切片图常超 Pillow 默认像素上限）：
+# 关闭 DecompressionBomb 限制（默认 178,956,970 像素），避免打开大图报错
+PILImage.MAX_IMAGE_PIXELS = None
 from constants import COL_WIDTH_PX_PER_CHAR, ROW_HEIGHT_PX_PER_PT
 from safe_eval import _safe_eval_transform
 
@@ -185,6 +189,8 @@ class MappingOperations:
         for img in to_remove:
             ws._images.remove(img)
     def _process_image_data(self, img_bytes, rotation, target_w, target_h):
+        # 打开前再确认一次：关闭 DecompressionBomb 像素上限，支持超1.79亿像素大图
+        PILImage.MAX_IMAGE_PIXELS = None
         pil_img = PILImage.open(io.BytesIO(img_bytes))
         if rotation != 0:
             pil_img = pil_img.rotate(-rotation, expand=True)

@@ -214,6 +214,8 @@ def ocr_image(image_path, roi=None, preprocess='none', lang='ch'):
     """
     ocr = _get_ocr(lang)
     from PIL import Image
+    # 高分辨率切片大图常超过 Pillow 默认像素上限，关闭 DecompressionBomb 限制
+    Image.MAX_IMAGE_PIXELS = None
     img = Image.open(image_path)
     if img.mode != 'RGB':
         img = img.convert('RGB')
