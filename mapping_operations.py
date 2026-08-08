@@ -14,6 +14,7 @@ PILImage.MAX_IMAGE_PIXELS = None
 from constants import (
     COL_WIDTH_PX_PER_CHAR, ROW_HEIGHT_PX_PER_PT,
     IMAGE_JPEG_QUALITY, IMAGE_JPEG_QUALITY_LARGE, IMAGE_JPEG_LARGE_THRESHOLD_KB,
+    IMAGE_DOWNSAMPLE_MAX_SIDE,
 )
 from safe_eval import _safe_eval_transform
 
@@ -242,6 +243,14 @@ class MappingOperations:
         pil_img = PILImage.open(io.BytesIO(img_bytes))
         if rotation != 0:
             pil_img = pil_img.rotate(-rotation, expand=True)
+        # 降采样：超大图（最长边 > 2048px）先缩到 2048px 再 resize 到目标尺寸，
+        # 避免 2 亿像素原图全解码撑爆内存（207MP → ~4MP → 目标尺寸）
+        w, h = pil_img.size
+        longest = max(w, h)
+        if longest > IMAGE_DOWNSAMPLE_MAX_SIDE:
+            scale = IMAGE_DOWNSAMPLE_MAX_SIDE / longest
+            nw, nh = int(w * scale), int(h * scale)
+            pil_img = pil_img.resize((nw, nh), PILImage.LANCZOS)
         pil_img = pil_img.resize((target_w, target_h), PILImage.LANCZOS)
         # 输出统一为 JPEG：体积小、编码快，降低输出文件与内存占用。
         # JPEG 不支持透明通道，RGBA/调色板透明图先贴到白底再保存。

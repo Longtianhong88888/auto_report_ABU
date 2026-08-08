@@ -32,4 +32,5 @@ OCR_MAX_IMAGE_SIDE = 2048  # OCR 识别前原图最长边上限（像素），�
 IMAGE_JPEG_QUALITY = 90          # 默认 JPEG 质量（PNG→JPEG、小 JPEG）
 IMAGE_JPEG_QUALITY_LARGE = 85    # 大图 JPEG 重编码质量（>200KB 的原 JPEG，测试 q=85 肉眼无差异）
 IMAGE_JPEG_LARGE_THRESHOLD_KB = 200  # 重编码触发阈值
+IMAGE_DOWNSAMPLE_MAX_SIDE = 2048  # 图片处理降采样最长边（像素），超大图先缩至此再 resize 到目标尺寸，大幅降低内存峰值
 IMAGE_THUMB_MAX_SIDE = 512  # 图片预览缩略图最长边（像素），JPEG 缩略图避免全图解码卡顿
