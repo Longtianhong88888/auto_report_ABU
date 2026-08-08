@@ -11,7 +11,10 @@ from PIL import Image as PILImage
 # 本地受信任的高分辨率图片（显微镜切片图常超 Pillow 默认像素上限）：
 # 关闭 DecompressionBomb 限制（默认 178,956,970 像素），避免打开大图报错
 PILImage.MAX_IMAGE_PIXELS = None
-from constants import COL_WIDTH_PX_PER_CHAR, ROW_HEIGHT_PX_PER_PT
+from constants import (
+    COL_WIDTH_PX_PER_CHAR, ROW_HEIGHT_PX_PER_PT,
+    IMAGE_JPEG_QUALITY, IMAGE_JPEG_QUALITY_LARGE, IMAGE_JPEG_LARGE_THRESHOLD_KB,
+)
 from safe_eval import _safe_eval_transform
 
 class MappingOperations:
@@ -35,7 +38,8 @@ class MappingOperations:
             return ('archive', m.get('target_sheet'), tuple(m.get('block_range')))
         if t == 'data':
             return ('data', m.get('target_sheet'), tuple(m.get('target_range')),
-                    m.get('source_sheet'), m.get('source_range'), m.get('transform'))
+                    m.get('source_sheet'), m.get('source_range'), m.get('transform'),
+                    bool(m.get('clear_target')))
         if t == 'image':
             return ('image', m.get('target_sheet'), m.get('anchor_cell'))
         if t == 'jmp':
@@ -178,25 +182,86 @@ class MappingOperations:
                         f"{src_ws.title}!{get_column_letter(src_col)}{src_row}",
                         f"{ws.title}!{get_column_letter(dst_col)}{dst_row}")
                     ws.cell(row=dst_row, column=dst_col).value = val
+    @staticmethod
+    def _image_anchor_row_col(img):
+        """图片锚点 → (行, 列)。兼容 openpyxl 对象锚点与字符串锚点
+        （如 'A6'；新添加的图片在保存前 anchor 保持为字符串）。"""
+        anchor = getattr(img, 'anchor', None)
+        pos = getattr(anchor, '_from', None)
+        if pos is not None:
+            return pos.row + 1, pos.col + 1
+        if isinstance(anchor, str):
+            m = re.match(r'^([A-Z]+)(\d+)$', anchor)
+            if m:
+                return int(m.group(2)), column_index_from_string(m.group(1))
+        return None
     def remove_images_at_anchor(self, ws, anchor):
+        m = re.match(r'^([A-Z]+)(\d+)$', anchor)
+        target = (int(m.group(2)), column_index_from_string(m.group(1))) if m else None
+        if target is None:
+            return
         to_remove = []
         for img in ws._images:
-            if hasattr(img, 'anchor') and hasattr(img.anchor, '_from'):
-                r = img.anchor._from.row + 1
-                c = img.anchor._from.col + 1
-                if f"{get_column_letter(c)}{r}" == anchor:
-                    to_remove.append(img)
+            pos = self._image_anchor_row_col(img)
+            if pos == target:
+                to_remove.append(img)
         for img in to_remove:
             ws._images.remove(img)
+    def remove_images_in_region(self, ws, min_row, min_col, max_row, max_col):
+        """移除锚点落在指定区域内的全部图片（PBO→MBO 整区清空用）"""
+        to_remove = []
+        for img in ws._images:
+            pos = self._image_anchor_row_col(img)
+            if pos is None:
+                continue
+            r, c = pos
+            if min_row <= r <= max_row and min_col <= c <= max_col:
+                to_remove.append(img)
+        for img in to_remove:
+            ws._images.remove(img)
+    def clear_region(self, ws, region):
+        """清空区域内所有单元格数值与图片（保留样式/合并单元格结构）。
+        合并单元格只清左上角（其余为只读 MergedCell），保证区域数据不再显示旧值。"""
+        min_row, min_col, max_row, max_col = region
+        for r in range(min_row, max_row + 1):
+            for c in range(min_col, max_col + 1):
+                cell = ws.cell(row=r, column=c)
+                try:
+                    cell.value = None
+                except AttributeError:
+                    # MergedCell 值只读，左上角已在上面的循环里清空
+                    pass
+        self.remove_images_in_region(ws, min_row, min_col, max_row, max_col)
     def _process_image_data(self, img_bytes, rotation, target_w, target_h):
         # 打开前再确认一次：关闭 DecompressionBomb 像素上限，支持超1.79亿像素大图
         PILImage.MAX_IMAGE_PIXELS = None
+        # 检测原始格式：JPEG 重编码可激进压缩（q=85 肉眼无差异），
+        # PNG 首次转 JPEG 保持高画质（q=90）。
+        is_source_jpeg = img_bytes[:2] == b'\xff\xd8'
+        source_kb = len(img_bytes) / 1024
         pil_img = PILImage.open(io.BytesIO(img_bytes))
         if rotation != 0:
             pil_img = pil_img.rotate(-rotation, expand=True)
         pil_img = pil_img.resize((target_w, target_h), PILImage.LANCZOS)
+        # 输出统一为 JPEG：体积小、编码快，降低输出文件与内存占用。
+        # JPEG 不支持透明通道，RGBA/调色板透明图先贴到白底再保存。
+        has_alpha = (pil_img.mode in ('RGBA', 'LA')
+                     or (pil_img.mode == 'P' and 'transparency' in pil_img.info))
+        if has_alpha:
+            rgba = pil_img.convert('RGBA')
+            bg = PILImage.new('RGB', rgba.size, (255, 255, 255))
+            bg.paste(rgba, mask=rgba.split()[3])
+            pil_img = bg
+        else:
+            pil_img = pil_img.convert('RGB')
+        # 智能选择压缩质量：大 JPEG 原图（>200KB）用 q=85 节省体积，
+        # 小 JPEG 和 PNG 转码用 q=90 保证画质
+        quality = IMAGE_JPEG_QUALITY
+        if is_source_jpeg and source_kb > IMAGE_JPEG_LARGE_THRESHOLD_KB:
+            quality = IMAGE_JPEG_QUALITY_LARGE
         out_stream = io.BytesIO()
-        pil_img.save(out_stream, format='PNG')
+        pil_img.save(out_stream, format='JPEG',
+                     quality=quality, optimize=True)
         out_stream.seek(0)
         return out_stream
     def apply_image_mapping(self, ws, mapping):

@@ -4,5 +4,8 @@ PyQt5-Qt5>=5.15
 PyQt5-sip>=12.11
 openpyxl>=3.0
 Pillow>=9.0
-paddlepaddle>=3.0.0,<4.0.0
-paddleocr>=3.0.0,<4.0.0
+# 锁定本机验证过的版本组合：Windows 打包必须与开发环境一致，
+# 避免 CI 安装到 paddleocr/paddlepaddle 版本不匹配导致 CPU 推理崩溃
+paddlepaddle==3.3.1
+paddleocr==3.7.0
+paddlex==3.7.2

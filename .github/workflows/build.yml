@@ -1,4 +1,4 @@
-name: Build Windows Executable (Fast)
+name: Build Windows Executables
 
 on:
   push:
@@ -6,7 +6,47 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
+  # ── Image Compressor (lightweight, no OCR) ──
+  build-compressor:
+    runs-on: windows-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install Pillow openpyxl PyQt5 pyinstaller
+
+    - name: Build Windows executable
+      shell: pwsh
+      run: |
+        pyinstaller --windowed --name "Excel_Image_Compressor" `
+          --add-data "constants.py;." `
+          --hidden-import PIL `
+          --hidden-import PIL.Image `
+          --hidden-import openpyxl `
+          --hidden-import openpyxl.drawing.image `
+          --hidden-import PyQt5 `
+          --hidden-import PyQt5.QtCore `
+          --hidden-import PyQt5.QtGui `
+          --hidden-import PyQt5.QtWidgets `
+          compress_excel_images.py
+        Compress-Archive -Path dist\Excel_Image_Compressor\* -DestinationPath dist\Excel_Image_Compressor.zip
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: Excel_Image_Compressor_Windows
+        path: dist/Excel_Image_Compressor.zip
+
+  # ── Main App (with PaddleOCR) ──
+  build-main:
     runs-on: windows-latest
 
     steps:
@@ -36,6 +76,8 @@ jobs:
         import os
         # Windows CPU：PIR+OneDNN 对 PP-OCRv6 有已知崩溃，关闭 MKLDNN
         os.environ['PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT'] = 'false'
+        # 打包后 OpenCV 与 Paddle 的 OpenMP 重复库冲突会静默崩溃
+        os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
         from paddleocr import PaddleOCR
         ocr = PaddleOCR(lang='en',
                         enable_mkldnn=False,
@@ -88,6 +130,7 @@ jobs:
           --collect-all paddleocr `
           --collect-all paddlex `
           --collect-all cv2 `
+          --collect-all safetensors `
           main.py
         # 压缩输出目录
         Compress-Archive -Path dist\main\* -DestinationPath dist\auto_report.zip

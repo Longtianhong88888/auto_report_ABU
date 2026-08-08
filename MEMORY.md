@@ -82,6 +82,22 @@
 
 ## 六、已知问题与待办
 
+- 【已修复 2026-08-08】OCR 改为子进程隔离执行（Windows 崩溃不再拖垮主程序）：
+  - 背景：PaddleOCR/Paddle 在 Windows CPU 存在原生崩溃（0xC0000005），Python 异常钩子拦不住，之前直接导致整个软件退出、已做的映射配置前功尽弃
+  - 方案：`ocr_batch`/`ocr_batch_with_rois` 内部用 `multiprocessing` spawn 启动独立 OCR 子进程，父进程通过队列逐张收结果；子进程崩溃/超时抛 `OCRSubprocessError`，预览与输出流程转成可读提示，主程序继续运行
+  - 父进程不再导入 paddle 本体：`ocr_available()` 改用 `importlib.util.find_spec` 探测，Paddle 的 DLL 只在子进程加载；`main.py` 的 `__main__` 增加 `multiprocessing.freeze_support()`（PyInstaller 冻结环境必需）
+  - 超时：首次结果 300s（模型加载），之后每张 120s；每次识别调用启动一个新子进程（含模型加载，冷启动约 15-30s）
+  - 识别前图像压缩：`ocr_image` 在 ROI 裁剪后、预处理/转 numpy 前调用 `_limit_image_size`，把最长边等比压缩到 `OCR_MAX_IMAGE_SIDE=2048`（constants.py），超大显微镜图（几千万像素）不再直接转数组占内存；PP-OCRv6 检测内部本就缩放到约 736~960 边长，2048 上限不影响识别质量
+  - 图片插入输出统一为 JPEG：`_process_image_data` 由 PNG 改为 JPEG（`IMAGE_JPEG_QUALITY=90`，optimize 优化），照片类图同尺寸下体积约减 89%，降低 xlsx 与内存占用；JPEG 不支持透明通道，RGBA/调色板透明图先贴白底再编码
+  - 图片预览加载同样走 JPEG 缩略图：`_cache_all_images` 读取数据源图片时用 `utils.make_image_thumbnail` 同步生成最长边 512 的 JPEG 缩略图（cached_images 元组扩为 7 项），`InternalImageSelectDialog` 列表图标与右侧预览只解码缩略图，不再对超大原图全图解码，图片多时不会卡死；输出报告仍用原始字节，质量不受影响
+- 【已修复 2026-08-08】Windows 上运行 OCR 识别直接崩溃（进程无提示退出）：
+  - 根因：Windows/Linux x86_64 上 PaddlePaddle 3.3.0+ 的 PIR→oneDNN(MKLDNN) 回归会让 PP-OCRv6 CPU 推理硬崩溃（ConvertPirAttribute2RuntimeAttribute，退出码 0xC0000005）；且 paddlex 在**模块导入时**读取 `PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT`，原代码在 `_get_ocr()` 内才设置，此时 `ocr_available()` 已提前 import 过 paddleocr，开关实际失效
+  - 修复：`main.py` 与 `ocr_engine.py` 模块顶部（任何 paddleocr/paddlex import 之前）设置 `PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT=false`；同时设置 `KMP_DUPLICATE_LIB_OK=TRUE` 防打包后 OpenCV/Paddle 的 OpenMP 重复库冲突静默崩溃
+  - requirements.txt 锁定本机验证过的组合：paddlepaddle==3.3.1、paddleocr==3.7.0、paddlex==3.7.2；build.yml 预热同样加 `KMP_DUPLICATE_LIB_OK`，打包加 `--collect-all safetensors`
+- 【已修复 2026-08-08】PBO 模板做 MBO 报告（PBO 数据/图片比 MBO 多）：
+  - 数据映射新增“填充前先清空整个目标区域（数值+图片）”勾选项（TransformDialog），输出时按区域先整区清空一次再执行所有映射，避免扩展区域内残留 PBO 旧数值/旧图片；同一区域只清一次，与映射添加顺序无关
+  - 图片批量映射允许图片数少于目标格子数（如 10×1 区域只提供 7 张）：按顺序从左上角填入，未填位置自动整区清空旧图片；图片数多于格子数时仅保留前 N 张并提示
+  - 图片锚点解析兼容 openpyxl 字符串锚点（如 `'A6'`，新加图片保存前 anchor 为字符串）与对象锚点，`remove_images_at_anchor`/`remove_images_in_region` 均可正确处理
 - 【已修复 2026-08-08】Mac 双指捏合缩放报错：`'QPinchGesture' object has no attribute 'scaleDelta'`。`QPinchGesture` 没有 `scaleDelta()`，`table_zoom.py` 改为 `scaleFactor() / lastScaleFactor()` 计算每次手势事件的相对缩放倍数，并防御 `lastScaleFactor=0`
 - 【已修复 2026-08-08】模板预览/图片输出提示“图片像素超过限制”载入失败：根因是 Pillow DecompressionBomb 默认上限（178,956,970 像素）；已在 `mapping_operations._process_image_data` 与 `ocr_engine.ocr_image` 打开图片前置 `Image.MAX_IMAGE_PIXELS = None` 解除限制（本地受信任的高分辨率显微镜图片），并移除从未启用的 `OCR_MAX_IMAGE_DIMENSION_FOR_PREVIEW` 残留常量
 - 【已修复 2026-08-07】JMP 预览上限 500 行的问题：`display_sheet` / `SourceSelectDialog` 行上限改为 `MAX_PREVIEW_ROWS`（constants.py，默认 10000，按内容实际范围计算）；渲染循环改为稀疏遍历 `ws._cells`（不再物化空单元格，8000×30 渲染约 2.9s）
