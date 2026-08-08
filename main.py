@@ -367,12 +367,23 @@ class MainWindow(QMainWindow, MappingOperations, TableZoomMixin):
         self.display_sheet(self.template_wb[self.current_sheet_name])
         self.refresh_mapping_list()
 
+    # 预览不允许出现黑色单元格：深/黑色填充（如主题 dk1=#000000、
+    # indexed 8）一律替换为浅灰，保证预览干净可读（输出文件不受影响）
+    PREVIEW_DARK_FILL_THRESHOLD = 0.5
+    PREVIEW_DARK_FILL_REPLACEMENT = "#D9D9D9"
+
     def _cell_fill_color(self, cell, wb):
-        """解析单元格填充色；无填充/无法解析返回 None（避免默认黑色误渲染）"""
+        """解析单元格填充色；无填充/无法解析返回 None。
+        深/黑色填充在预览中替换为浅灰，不允许出现黑色单元格。"""
         fill = cell.fill
         if not fill or not fill.patternType:
             return None
-        return self._resolve_color(fill.fgColor, wb)
+        qc = self._resolve_color(fill.fgColor, wb)
+        if qc is None:
+            return None
+        if self._luminance(qc) < self.PREVIEW_DARK_FILL_THRESHOLD:
+            return QColor(self.PREVIEW_DARK_FILL_REPLACEMENT)
+        return qc
 
     def _cell_font_color(self, cell, wb):
         """解析单元格字体色。

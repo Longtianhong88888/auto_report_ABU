@@ -73,6 +73,7 @@
 ## 五、渲染“所见即所得”（易踩坑）
 
 - 无填充单元格不渲染黑色；表格强制白色底色（防系统深色模式）
+- **预览不允许出现黑色单元格**：深/黑色填充（主题 dk1=#000000、indexed 8 等，亮度 < 0.5）在预览中一律替换为浅灰 `#D9D9D9`（`_cell_fill_color`，阈值与替换色为类常量 `PREVIEW_DARK_FILL_THRESHOLD` / `PREVIEW_DARK_FILL_REPLACEMENT`），自动字色随浅底变黑字，保证可读；仅预览层替换，输出文件不受影响
 - “自动色”字体（theme 0/1、indexed 8/9/64/65、未设置颜色）按背景亮度自适应：亮度 < 0.5 → 白字，否则黑字；显式 rgb 原样
 - 主题色 tint 按 OOXML 公式计算（负值向黑、正值向白）
 - **openpyxl 不展开 `<col min max>` 区间列**（如 `<col min="3" max="13" width="33"/>`）→ `_column_width_chars()` 遍历 `column_dimensions` 按 min/max 匹配；未定义列回落 `defaultColWidth`；行高同理回落 `defaultRowHeight`（main.py 与 dialogs.py 各有一份）
