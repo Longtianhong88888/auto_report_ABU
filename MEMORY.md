@@ -1,6 +1,6 @@
 # 项目记忆（MEMORY.md）
 
-> 供后续开发/维护快速恢复上下文。最后更新：2026-08-07
+> 供后续开发/维护快速恢复上下文。最后更新：2026-08-08
 
 ## 一、项目概况
 
@@ -8,8 +8,8 @@
 - 入口：`main.py`；依赖：`requirements.txt`（PyQt5、openpyxl、Pillow 等）
 - Windows 打包：GitHub Actions（`.github/workflows/build.yml`），push 到 main 自动构建，产物 `dist/auto_report.zip`（PyInstaller 目录包 + 图标/splash）
 - 远程仓库：`origin git@github.com:Longtianhong88888/auto_report_ABU.git`，分支 `main`
-- 最新提交：`bbee4c5 表格支持 Ctrl+Shift+方向键快速扩展选区`（已推送）
-- 近三次提交：`02ad559`（JMP 500 行上限修复）、`9c11366`（表格缩放）、`bbee4c5`（Ctrl+Shift+方向键选区）
+- 最新提交：`ac3986f 解除图片像素上限：关闭Pillow DecompressionBomb限制，支持超高分辨率图片`
+- 近三次提交：`ac3986f`（解除图片像素上限）、`5577f1f`（关闭MKLDNN修复Windows CPU崩溃）、`ab4504f`（修复CI模型预下载）
 - 本地未提交内容：`manual_shots/`（说明书截图）、使用说明书 PPT、`问题点.txt`（用户问题清单）
 
 ## 二、模块结构
@@ -79,6 +79,7 @@
 
 ## 六、已知问题与待办
 
+- 【已修复 2026-08-08】模板预览/图片输出提示“图片像素超过限制”载入失败：根因是 Pillow DecompressionBomb 默认上限（178,956,970 像素）；已在 `mapping_operations._process_image_data` 与 `ocr_engine.ocr_image` 打开图片前置 `Image.MAX_IMAGE_PIXELS = None` 解除限制（本地受信任的高分辨率显微镜图片），并移除从未启用的 `OCR_MAX_IMAGE_DIMENSION_FOR_PREVIEW` 残留常量
 - 【已修复 2026-08-07】JMP 预览上限 500 行的问题：`display_sheet` / `SourceSelectDialog` 行上限改为 `MAX_PREVIEW_ROWS`（constants.py，默认 10000，按内容实际范围计算）；渲染循环改为稀疏遍历 `ws._cells`（不再物化空单元格，8000×30 渲染约 2.9s）
 - ACF 模板约 109MB，加载慢（非代码问题）；测试优先用 BUF27 模板（35MB）
 - 归档读取公式缓存值；文件未经 Excel 保存过时公式列为空 → 输出告警
