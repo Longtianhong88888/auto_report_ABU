@@ -1,6 +1,14 @@
 import sys
-import json
 import os
+import multiprocessing
+
+# 必须在任何 paddleocr/paddlex import 之前设置：
+# Windows CPU 上 PaddlePaddle 3.3.x 的 PIR→oneDNN 回归会让 PP-OCRv6 推理直接崩溃；
+# OpenCV 与 Paddle 的 OpenMP 重复库冲突会在 predict 时静默崩溃。
+os.environ.setdefault('PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT', 'false')
+os.environ.setdefault('KMP_DUPLICATE_LIB_OK', 'TRUE')
+
+import json
 import io
 import re
 import datetime
@@ -37,7 +45,10 @@ from ocr_engine import ocr_available
 from mapping_operations import MappingOperations
 from version_finder import suggest_files
 from table_zoom import TableZoomMixin
-from utils import column_width_chars, apply_uniform_sizes, normalize_mappings
+from utils import (
+    column_width_chars, apply_uniform_sizes, normalize_mappings,
+    make_image_thumbnail,
+)
 from ui_theme import (
     APPLE_QSS, CARD_PAD, C_SUB, GAP_SECTION, WINDOW_MIN_SIZE,
     window_target_size,
@@ -274,7 +285,11 @@ class MainWindow(QMainWindow, MappingOperations, TableZoomMixin):
                         continue
                 width = getattr(img, 'width', '')
                 height = getattr(img, 'height', '')
-                self.cached_images.append((sheet_name, idx, pos, img_data, width, height))
+                # 同时生成 JPEG 小缩略图供选择/预览用，避免预览时全图解码卡顿；
+                # 输出报告仍用原始 img_data，不受影响
+                thumb = make_image_thumbnail(img_data)
+                self.cached_images.append(
+                    (sheet_name, idx, pos, img_data, width, height, thumb))
                 done += 1
                 self._update_progress(prog, done, total)
         self._close_progress(prog)
@@ -677,6 +692,7 @@ class MainWindow(QMainWindow, MappingOperations, TableZoomMixin):
             if not trans_dlg.exec_():
                 return
             trans_type, trans_expr = trans_dlg.get_transform()
+            clear_target = trans_dlg.get_clear_target()
 
             if trans_type == 'custom' and trans_expr.strip():
                 err = _check_transform_expr(trans_expr.strip())
@@ -706,7 +722,8 @@ class MainWindow(QMainWindow, MappingOperations, TableZoomMixin):
                 'source_sheet': src_sheet,
                 'source_range': src_range,
                 'transform': trans_type,
-                'transform_expr': trans_expr
+                'transform_expr': trans_expr,
+                'clear_target': clear_target
             })
             self.refresh_mapping_list()
 
@@ -722,15 +739,15 @@ class MainWindow(QMainWindow, MappingOperations, TableZoomMixin):
                                default_row_height=default_h)
         if not dlg.exec_():
             return
-        col_width_chars, row_height_pts, rotation, w_scale, h_scale = dlg.get_values()
+        col_width_chars, row_height_pts, rotation, w_scale, h_scale, alignment = dlg.get_values()
 
         _, _, t_max_row, t_max_col = self.current_selection
         rows = t_max_row - t_min_row + 1
         cols = t_max_col - t_min_col + 1
         if rows * cols == 1:
-            self._add_single_image_mapping(col_width_chars, row_height_pts, rotation, w_scale, h_scale)
+            self._add_single_image_mapping(col_width_chars, row_height_pts, rotation, w_scale, h_scale, alignment)
         else:
-            self._add_batch_image_mapping(rows, cols, col_width_chars, row_height_pts, rotation, w_scale, h_scale)
+            self._add_batch_image_mapping(rows, cols, col_width_chars, row_height_pts, rotation, w_scale, h_scale, alignment)
 
     def _cell_default_size(self, ws, row, col):
         """锚点单元格（或所在合并区域）的默认图片尺寸：列宽(字符)、行高(磅)。
@@ -754,7 +771,7 @@ class MainWindow(QMainWindow, MappingOperations, TableZoomMixin):
                 height_pts += ws.sheet_format.defaultRowHeight or DEFAULT_ROW_HEIGHT_PTS
         return round(width_chars, 1), round(height_pts, 1)
 
-    def _add_single_image_mapping(self, col_width_chars, row_height_pts, rotation, w_scale, h_scale):
+    def _add_single_image_mapping(self, col_width_chars, row_height_pts, rotation, w_scale, h_scale, alignment='left'):
         t_row, t_col, _, _ = self.current_selection
         anchor = f"{get_column_letter(t_col)}{t_row}"
 
@@ -772,7 +789,8 @@ class MainWindow(QMainWindow, MappingOperations, TableZoomMixin):
                     'row_height_pts': row_height_pts,
                     'rotation': rotation,
                     'width_scale': w_scale,
-                    'height_scale': h_scale
+                    'height_scale': h_scale,
+                    'alignment': alignment,
                 }
                 self.mappings.append(mapping)
                 self.refresh_mapping_list()
@@ -793,7 +811,8 @@ class MainWindow(QMainWindow, MappingOperations, TableZoomMixin):
                         'row_height_pts': row_height_pts,
                         'rotation': rotation,
                         'width_scale': w_scale,
-                        'height_scale': h_scale
+                        'height_scale': h_scale,
+                        'alignment': alignment,
                     }
                     self.mappings.append(mapping)
                     self.refresh_mapping_list()
@@ -818,12 +837,13 @@ class MainWindow(QMainWindow, MappingOperations, TableZoomMixin):
                     'row_height_pts': row_height_pts,
                     'rotation': rotation,
                     'width_scale': w_scale,
-                    'height_scale': h_scale
+                    'height_scale': h_scale,
+                    'alignment': alignment,
                 }
                 self.mappings.append(mapping)
                 self.refresh_mapping_list()
 
-    def _add_batch_image_mapping(self, rows, cols, col_width_chars, row_height_pts, rotation, w_scale, h_scale):
+    def _add_batch_image_mapping(self, rows, cols, col_width_chars, row_height_pts, rotation, w_scale, h_scale, alignment='left'):
         if not self.source_wb:
             QMessageBox.warning(self, "提示", "请先打开数据源文件")
             return
@@ -835,25 +855,39 @@ class MainWindow(QMainWindow, MappingOperations, TableZoomMixin):
         if dlg.exec_() != QDialog.Accepted:
             return
         images = dlg.get_image_sequence()
-        if len(images) < rows * cols:
-            QMessageBox.warning(self, "图片不足", f"需要 {rows*cols} 张图片，只提供了 {len(images)} 张")
+        if not images:
+            QMessageBox.warning(self, "图片不足", "未选择任何图片，无法添加批量图片映射")
             return
+        need = rows * cols
+        if len(images) > need:
+            QMessageBox.warning(self, "图片超出目标区域",
+                f"目标区域共 {need} 个单元格，选择了 {len(images)} 张图片，"
+                "仅保留前 " + str(need) + " 张。")
+            images = images[:need]
         t_min_row, t_min_col, _, _ = self.current_selection
-        idx = 0
+        _, _, t_max_row, t_max_col = self.current_selection
+        # PBO→MBO 时图片数少于模板区域：整区清空旧图片，新图按顺序从左上角填入，
+        # 未填位置保持空白，避免残留 PBO 图片
+        clear_region = (t_min_row, t_min_col, t_max_row, t_max_col)
+        count = 0
         for r in range(rows):
             for c in range(cols):
+                if count >= len(images):
+                    break
                 anchor = f"{get_column_letter(t_min_col + c)}{t_min_row + r}"
-                img_type, img_data = images[idx]
-                idx += 1
+                img_type, img_data = images[count]
+                count += 1
                 base_mapping = {
                     'type': 'image',
                     'target_sheet': self.current_sheet_name,
                     'anchor_cell': anchor,
+                    'clear_region': clear_region,
                     'col_width_chars': col_width_chars,
                     'row_height_pts': row_height_pts,
                     'rotation': rotation,
                     'width_scale': w_scale,
-                    'height_scale': h_scale
+                    'height_scale': h_scale,
+                    'alignment': alignment,
                 }
                 if img_type == 'file':
                     base_mapping['image_path'] = img_data
@@ -1174,9 +1208,13 @@ class MainWindow(QMainWindow, MappingOperations, TableZoomMixin):
             if m['type'] == 'data':
                 trans = m.get('transform', 'none')
                 trans_str = f" [转换:{trans}]" if trans != 'none' else ""
+                if m.get('clear_target'):
+                    trans_str += " [先清空目标区]"
                 desc += f"数据: {m['target_range']} <- {m['source_sheet']}!{m['source_range']}{trans_str}"
             elif m['type'] == 'image':
-                desc += f"图片: 锚点{m['anchor_cell']} (列宽{m.get('col_width_chars','?')} 行高{m.get('row_height_pts','?')} 旋转{m.get('rotation',0)}° 缩放{m.get('width_scale',1.0)}x{m.get('height_scale',1.0)})"
+                align = m.get('alignment', 'left')
+                align_cn = {'left': '左', 'center': '中', 'right': '右'}.get(align, align)
+                desc += f"图片: 锚点{m['anchor_cell']} (列宽{m.get('col_width_chars','?')} 行高{m.get('row_height_pts','?')} 旋转{m.get('rotation',0)}° 缩放{m.get('width_scale',1.0)}x{m.get('height_scale',1.0)} {align_cn}对齐)"
             elif m['type'] == 'archive_shift_right':
                 src_col = m.get('source_col', '?')
                 desc += f"归档: {m['block_range']} <- {src_col}列 新表头\"{m['new_headers']}\""
@@ -1438,6 +1476,22 @@ class MainWindow(QMainWindow, MappingOperations, TableZoomMixin):
             middle_mappings = [m for m in sheet_mappings
                                if m.get('type') not in ('archive_shift_right', 'jmp')]
             jmp_mappings = [m for m in sheet_mappings if m.get('type') == 'jmp']
+
+            # PBO→MBO 整区更新：先按区域一次性清空数值+图片（数据映射勾选“先清空目标区”，
+            # 图片批量映射自动整区清空），再执行填充，避免扩展区域内残留 PBO 旧数据/旧图片。
+            # 同一区域只清一次，与映射添加顺序无关。
+            cleared_regions = set()
+            for m in middle_mappings:
+                region = None
+                if m.get('type') == 'data' and m.get('clear_target'):
+                    region = m.get('target_range')
+                elif m.get('type') == 'image' and m.get('clear_region'):
+                    region = m.get('clear_region')
+                if region:
+                    key = (sheet_name, tuple(region))
+                    if key not in cleared_regions:
+                        cleared_regions.add(key)
+                        self.clear_region(ws, region)
 
             def run_mapping(mapping):
                 nonlocal done
@@ -1748,6 +1802,8 @@ def _crossfade(splash, window, duration=FADE_MS, on_finished=None):
 
 
 if __name__ == '__main__':
+    # PyInstaller 冻结环境下 multiprocessing spawn 子进程需要此调用
+    multiprocessing.freeze_support()
     # Windows 高分屏适配（必须在 QApplication 创建前设置）
     if hasattr(Qt, 'AA_EnableHighDpiScaling'):
         QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)

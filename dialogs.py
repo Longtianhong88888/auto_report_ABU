@@ -53,6 +53,12 @@ class ImageSetupDialog(QDialog):
         self.height_scale.setValue(1.0)
         layout.addRow("高度缩放比例:", self.height_scale)
 
+        self.alignment = QComboBox()
+        self.alignment.addItem("左对齐", "left")
+        self.alignment.addItem("居中对齐", "center")
+        self.alignment.addItem("右对齐", "right")
+        layout.addRow("图片对齐:", self.alignment)
+
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
@@ -61,7 +67,8 @@ class ImageSetupDialog(QDialog):
     def get_values(self):
         return (self.col_width.value(), self.row_height.value(),
                 self.rotation.value(),
-                self.width_scale.value(), self.height_scale.value())
+                self.width_scale.value(), self.height_scale.value(),
+                self.alignment.currentData())
 
 
 # ================== 版本号查找对话框 ==================
@@ -204,6 +211,10 @@ class TransformDialog(QDialog):
         self.radio_custom.toggled.connect(lambda checked: self.custom_expr.setEnabled(checked))
         layout.addWidget(self.custom_expr)
 
+        self.clear_target_cb = QCheckBox(
+            "填充前先清空整个目标区域（数值+图片；PBO模板做MBO报告时勾选）")
+        layout.addWidget(self.clear_target_cb)
+
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
@@ -218,6 +229,9 @@ class TransformDialog(QDialog):
             return 'strip_letters', ''
         else:
             return 'custom', self.custom_expr.text()
+
+    def get_clear_target(self):
+        return self.clear_target_cb.isChecked()
 
 
 # ================== 归档配置对话框（动态输入框） ==================
@@ -569,9 +583,11 @@ class InternalImageSelectDialog(QDialog):
         # 延迟到对话框显示后再生成缩略图，进度条才可见
         QTimer.singleShot(0, self.refresh_list)
 
-    def _thumbnail(self, img_data):
+    def _thumbnail(self, img_data, thumb_data=None):
+        # 优先用加载数据源时生成的 JPEG 缩略图，避免全图解码
+        data = thumb_data or img_data
         pix = QPixmap()
-        if img_data and pix.loadFromData(img_data):
+        if data and pix.loadFromData(data):
             return QIcon(pix.scaled(QSize(64, 64), Qt.KeepAspectRatio, Qt.SmoothTransformation))
         return QIcon()
 
@@ -590,8 +606,8 @@ class InternalImageSelectDialog(QDialog):
             self.thumb_progress.setVisible(True)
             QApplication.processEvents()
         for n, ci in enumerate(visible, 1):
-            sh, idx, pos, data, w, h = self.cached_images[ci]
-            item = QListWidgetItem(self._thumbnail(data), f"{pos}  ({w}×{h})")
+            sh, idx, pos, data, w, h, thumb = self.cached_images[ci]
+            item = QListWidgetItem(self._thumbnail(data, thumb), f"{pos}  ({w}×{h})")
             item.setData(Qt.UserRole, ci)  # 缓存图片列表中的原始索引
             item.setToolTip(f"{sh}  {pos}  {w}×{h}")
             self.list.addItem(item)
@@ -623,7 +639,8 @@ class InternalImageSelectDialog(QDialog):
         ci = current.data(Qt.UserRole)
         if ci is None or not (0 <= ci < len(self.cached_images)):
             return
-        data = self.cached_images[ci][3]
+        sh, idx, pos, data, w, h, thumb = self.cached_images[ci]
+        data = thumb or data
         pix = QPixmap()
         if data and pix.loadFromData(data):
             self.preview.setPixmap(
@@ -654,7 +671,9 @@ class BatchImageDialog(QDialog):
         self.image_list = []
 
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel(f"目标区域：{rows} 行 × {cols} 列，共需 {rows*cols} 张图片"))
+        layout.addWidget(QLabel(
+            f"目标区域：{rows} 行 × {cols} 列，最多 {rows*cols} 张图片"
+            "（不足时按顺序填入，未填位置整区清空）"))
 
         source_group = QGroupBox("图片来源")
         source_layout = QVBoxLayout(source_group)

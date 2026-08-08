@@ -273,6 +273,37 @@ class MappingOperations:
                      quality=quality, optimize=True)
         out_stream.seek(0)
         return out_stream
+    @staticmethod
+    def _build_aligned_anchor(anchor_str, alignment, col_width_chars, w_scale, image_width_px):
+        """根据对齐方式构建带水平偏移的图片锚点。
+
+        left:   锚定单元格左上角（默认）
+        center: 水平居中
+        right:  锚定单元格右侧
+        """
+        if alignment == 'left':
+            return anchor_str  # 默认行为，无需偏移
+
+        import re as _re
+        from openpyxl.drawing.spreadsheet_drawing import AnchorMarker
+
+        m = _re.match(r'^([A-Z]+)(\d+)$', anchor_str)
+        if not m:
+            return anchor_str
+
+        col_letter, row_num = m.group(1), int(m.group(2))
+        col_idx = column_index_from_string(col_letter) - 1  # 0-based
+
+        cell_width_px = int(col_width_chars * COL_WIDTH_PX_PER_CHAR * w_scale)
+        if alignment == 'center':
+            offset_px = max(0, (cell_width_px - image_width_px) / 2)
+        else:  # right
+            offset_px = max(0, cell_width_px - image_width_px)
+
+        col_off_emu = int(offset_px * 9525)  # px → EMU (1 px ≈ 9525 EMU @ 96 DPI)
+        return AnchorMarker(col=col_idx, colOff=col_off_emu,
+                           row=row_num - 1, rowOff=0)
+
     def apply_image_mapping(self, ws, mapping):
         try:
             anchor = mapping['anchor_cell']
@@ -281,11 +312,12 @@ class MappingOperations:
             rotation = mapping.get('rotation', 0.0)
             w_scale = mapping.get('width_scale', 1.0)
             h_scale = mapping.get('height_scale', 1.0)
+            alignment = mapping.get('alignment', 'left')
             target_width = int(col_width_chars * COL_WIDTH_PX_PER_CHAR * w_scale)
             target_height = int(row_height_pts * ROW_HEIGHT_PX_PER_PT * h_scale)
             if 'image_path' in mapping:
                 if not os.path.exists(mapping['image_path']):
-                    raise FileNotFoundError(f"图片文件不存在: {mapping['image_path']}")
+                    raise FileNotFoundError(f”图片文件不存在: {mapping['image_path']}”)
                 with open(mapping['image_path'], 'rb') as f:
                     img_bytes = f.read()
                 processed_stream = self._process_image_data(img_bytes, rotation, target_width, target_height)
@@ -293,10 +325,11 @@ class MappingOperations:
                 self.remove_images_at_anchor(ws, anchor)
                 new_img = OpenpyxlImage(processed_stream)
                 new_img._saved_bytes = processed_stream.getvalue()
-                new_img.anchor = anchor
+                new_img.anchor = self._build_aligned_anchor(anchor, alignment,
+                    col_width_chars, w_scale, target_width)
                 ws.add_image(new_img)
                 return
-            # 配置只记录映射路径：优先按“源Sheet + 锚点位置”从当前数据源
+            # 配置只记录映射路径：优先按”源Sheet + 锚点位置”从当前数据源
             # 重新读取图片内容，旧配置兼容 image_bytes / image_ref
             img_bytes = None
             if mapping.get('image_src_sheet') and mapping.get('image_src_pos'):
@@ -307,16 +340,17 @@ class MappingOperations:
             elif 'image_ref' in mapping and self.source_wb:
                 img_bytes = self._get_internal_image_bytes(mapping['image_ref'])
             if img_bytes is None:
-                raise RuntimeError("映射中缺少图片数据（请先打开 IPQC 数据源或重新选择图片）")
+                raise RuntimeError(“映射中缺少图片数据（请先打开 IPQC 数据源或重新选择图片）”)
             processed_stream = self._process_image_data(img_bytes, rotation, target_width, target_height)
             self._image_streams.append(processed_stream)
             self.remove_images_at_anchor(ws, anchor)
             new_img = OpenpyxlImage(processed_stream)
             new_img._saved_bytes = processed_stream.getvalue()
-            new_img.anchor = anchor
+            new_img.anchor = self._build_aligned_anchor(anchor, alignment,
+                col_width_chars, w_scale, target_width)
             ws.add_image(new_img)
         except Exception as e:
-            self._fill_warnings.append(f"图片写入失败 {mapping.get('anchor_cell', '?')}：{e}")
+            self._fill_warnings.append(f”图片写入失败 {mapping.get('anchor_cell', '?')}：{e}”)
     def _get_internal_image_bytes(self, image_ref):
         """按 (sheet, 序号) 从缓存中取图片字节（避免读取已被 openpyxl 关闭的 ref）"""
         sheet_name, idx = image_ref
