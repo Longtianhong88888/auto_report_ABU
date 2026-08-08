@@ -96,9 +96,12 @@ class TableZoomMixin:
             elif event.type() == QEvent.Gesture:
                 gesture = event.gesture(Qt.PinchGesture)
                 if gesture is not None:
-                    factor = gesture.scaleDelta()
-                    if factor:
-                        self._zoom_request(factor)
+                    # QPinchGesture 没有 scaleDelta()；相对倍数 =
+                    # 当前缩放因子 ÷ 上一次缩放因子（PyQt5 官方 API）
+                    prev = gesture.lastScaleFactor()
+                    cur = gesture.scaleFactor()
+                    if prev > 0:
+                        self._zoom_request(cur / prev)
                     return True
         # 混入类在 MRO 中位于 Qt 类之后，super() 没有 eventFilter；
         # 事件过滤器默认放行（返回 False）即可

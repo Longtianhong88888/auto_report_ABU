@@ -81,6 +81,7 @@
 
 ## 六、已知问题与待办
 
+- 【已修复 2026-08-08】Mac 双指捏合缩放报错：`'QPinchGesture' object has no attribute 'scaleDelta'`。`QPinchGesture` 没有 `scaleDelta()`，`table_zoom.py` 改为 `scaleFactor() / lastScaleFactor()` 计算每次手势事件的相对缩放倍数，并防御 `lastScaleFactor=0`
 - 【已修复 2026-08-08】模板预览/图片输出提示“图片像素超过限制”载入失败：根因是 Pillow DecompressionBomb 默认上限（178,956,970 像素）；已在 `mapping_operations._process_image_data` 与 `ocr_engine.ocr_image` 打开图片前置 `Image.MAX_IMAGE_PIXELS = None` 解除限制（本地受信任的高分辨率显微镜图片），并移除从未启用的 `OCR_MAX_IMAGE_DIMENSION_FOR_PREVIEW` 残留常量
 - 【已修复 2026-08-07】JMP 预览上限 500 行的问题：`display_sheet` / `SourceSelectDialog` 行上限改为 `MAX_PREVIEW_ROWS`（constants.py，默认 10000，按内容实际范围计算）；渲染循环改为稀疏遍历 `ws._cells`（不再物化空单元格，8000×30 渲染约 2.9s）
 - ACF 模板约 109MB，加载慢（非代码问题）；测试优先用 BUF27 模板（35MB）
