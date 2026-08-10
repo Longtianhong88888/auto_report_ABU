@@ -29,6 +29,17 @@ def column_width_chars(ws, col_idx):
     return ws.sheet_format.defaultColWidth or DEFAULT_COL_WIDTH_CHARS
 
 
+def excel_column_width_px(width_chars):
+    """Excel 列宽(字符) → 像素：默认字体最大数字宽约 7px + 每列 5px 边距
+    （Excel 官方换算：像素 = 字符数 × 最大数字宽 + 5，默认字体下取 7）。"""
+    return int(width_chars * 7 + 5)
+
+
+def excel_row_height_px(height_pts):
+    """Excel 行高(磅) → 像素：1 磅 = 96/72 px（96 DPI）。"""
+    return round(height_pts * 4 / 3)
+
+
 def apply_uniform_sizes(table, ws, max_cols, max_rows, zoom=None):
     """统一设置表格列宽与行高（未显式定义的行高回落 sheet 默认值）。
     zoom 传入 TableZoomMixin 实例时，同步记录基准尺寸并应用当前缩放。"""

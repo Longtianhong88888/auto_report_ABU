@@ -47,7 +47,7 @@ from version_finder import suggest_files
 from table_zoom import TableZoomMixin
 from utils import (
     column_width_chars, apply_uniform_sizes, normalize_mappings,
-    make_image_thumbnail,
+    make_image_thumbnail, excel_column_width_px, excel_row_height_px,
 )
 from ui_theme import (
     APPLE_QSS, CARD_PAD, C_SUB, GAP_SECTION, WINDOW_MIN_SIZE,
@@ -749,6 +749,16 @@ class MainWindow(QMainWindow, MappingOperations, TableZoomMixin):
             return
         col_width_chars, row_height_pts, rotation, w_scale, h_scale, alignment = dlg.get_values()
 
+        # 图片要精确填满单元格：用户未改动弹窗里的列宽/行高时，按当前表
+        # 逐列/逐行累计真实像素（含 Excel 每列 5px 边距）；改动了则按改动值换算。
+        defaults_kept = (abs(col_width_chars - default_w) < 0.05
+                         and abs(row_height_pts - default_h) < 0.05)
+        if defaults_kept:
+            cell_w_px, cell_h_px = self._cell_px(ws, t_min_row, t_min_col)
+        else:
+            cell_w_px = excel_column_width_px(col_width_chars)
+            cell_h_px = excel_row_height_px(row_height_pts)
+
         # 合并单元格：点选合并区域时 QTableWidget 的 selectedIndexes() 会返回
         # 覆盖范围内的全部格子，这里按合并后的单元格识别，而不是多行多列。
         merged = self._merged_range_at(ws, t_min_row, t_min_col)
@@ -759,10 +769,13 @@ class MainWindow(QMainWindow, MappingOperations, TableZoomMixin):
             rows = t_max_row - t_min_row + 1
             cols = t_max_col - t_min_col + 1
         if rows * cols == 1:
-            self._add_single_image_mapping(col_width_chars, row_height_pts, rotation, w_scale, h_scale, alignment)
+            self._add_single_image_mapping(col_width_chars, row_height_pts, rotation,
+                                           w_scale, h_scale, alignment,
+                                           cell_w_px=cell_w_px, cell_h_px=cell_h_px)
         else:
             self._add_batch_image_mapping(rows, cols, col_width_chars, row_height_pts,
-                                          rotation, w_scale, h_scale, alignment, ws=ws)
+                                          rotation, w_scale, h_scale, alignment, ws=ws,
+                                          defaults_kept=defaults_kept)
 
     @staticmethod
     def _merged_range_at(ws, row, col):
@@ -788,11 +801,30 @@ class MainWindow(QMainWindow, MappingOperations, TableZoomMixin):
         )
         height_pts = 0.0
         for r in range(row, row + row_span):
-            if r in ws.row_dimensions and ws.row_dimensions[r].height:
-                height_pts += ws.row_dimensions[r].height
-            else:
-                height_pts += ws.sheet_format.defaultRowHeight or DEFAULT_ROW_HEIGHT_PTS
+            height_pts += self._row_height_pts(ws, r)
         return round(width_chars, 1), round(height_pts, 1)
+
+    @staticmethod
+    def _row_height_pts(ws, row):
+        """某行行高（磅），未定义时回落 sheet 默认行高。"""
+        if row in ws.row_dimensions and ws.row_dimensions[row].height:
+            return ws.row_dimensions[row].height
+        return ws.sheet_format.defaultRowHeight or DEFAULT_ROW_HEIGHT_PTS
+
+    def _cell_px(self, ws, row, col):
+        """单元格（或所在合并区域）在 Excel 中的实际像素尺寸。
+        合并区域按列/行逐格累计（每列含 5px 边距），保证图片正好填满。"""
+        merged = self._merged_range_at(ws, row, col)
+        if merged:
+            m_min_col, m_min_row, m_max_col, m_max_row = merged
+            cols = range(m_min_col, m_max_col + 1)
+            rows = range(m_min_row, m_max_row + 1)
+        else:
+            cols = (col,)
+            rows = (row,)
+        width_px = sum(excel_column_width_px(column_width_chars(ws, c)) for c in cols)
+        height_px = sum(excel_row_height_px(self._row_height_pts(ws, r)) for r in rows)
+        return width_px, height_px
 
     def _logical_cells_in_region(self, ws, min_row, min_col, max_row, max_col):
         """行优先枚举区域内的逻辑单元格：合并区域只取左上角一个位置，
@@ -814,7 +846,8 @@ class MainWindow(QMainWindow, MappingOperations, TableZoomMixin):
                     cells.append((r, c))
         return cells
 
-    def _add_single_image_mapping(self, col_width_chars, row_height_pts, rotation, w_scale, h_scale, alignment='left'):
+    def _add_single_image_mapping(self, col_width_chars, row_height_pts, rotation, w_scale, h_scale,
+                                  alignment='left', cell_w_px=None, cell_h_px=None):
         t_row, t_col, _, _ = self.current_selection
         anchor = f"{get_column_letter(t_col)}{t_row}"
 
@@ -834,6 +867,8 @@ class MainWindow(QMainWindow, MappingOperations, TableZoomMixin):
                     'width_scale': w_scale,
                     'height_scale': h_scale,
                     'alignment': alignment,
+                    'cell_width_px': cell_w_px,
+                    'cell_height_px': cell_h_px,
                 }
                 self.mappings.append(mapping)
                 self.refresh_mapping_list()
@@ -856,6 +891,8 @@ class MainWindow(QMainWindow, MappingOperations, TableZoomMixin):
                         'width_scale': w_scale,
                         'height_scale': h_scale,
                         'alignment': alignment,
+                        'cell_width_px': cell_w_px,
+                        'cell_height_px': cell_h_px,
                     }
                     self.mappings.append(mapping)
                     self.refresh_mapping_list()
@@ -882,11 +919,14 @@ class MainWindow(QMainWindow, MappingOperations, TableZoomMixin):
                     'width_scale': w_scale,
                     'height_scale': h_scale,
                     'alignment': alignment,
+                    'cell_width_px': cell_w_px,
+                    'cell_height_px': cell_h_px,
                 }
                 self.mappings.append(mapping)
                 self.refresh_mapping_list()
 
-    def _add_batch_image_mapping(self, rows, cols, col_width_chars, row_height_pts, rotation, w_scale, h_scale, alignment='left', ws=None):
+    def _add_batch_image_mapping(self, rows, cols, col_width_chars, row_height_pts, rotation, w_scale,
+                                 h_scale, alignment='left', ws=None, defaults_kept=True):
         if not self.source_wb:
             QMessageBox.warning(self, "提示", "请先打开数据源文件")
             return
@@ -923,6 +963,13 @@ class MainWindow(QMainWindow, MappingOperations, TableZoomMixin):
             anchor = f"{get_column_letter(anchor_c)}{anchor_r}"
             img_type, img_data = images[count]
             count += 1
+            # 未改动弹窗尺寸时按每个逻辑单元格真实像素计算（合并区域逐列/逐行累计），
+            # 保证每张图都正好填满所在单元格
+            if defaults_kept and ws is not None:
+                cell_w_px, cell_h_px = self._cell_px(ws, anchor_r, anchor_c)
+            else:
+                cell_w_px = excel_column_width_px(col_width_chars)
+                cell_h_px = excel_row_height_px(row_height_pts)
             base_mapping = {
                 'type': 'image',
                 'target_sheet': self.current_sheet_name,
@@ -934,6 +981,8 @@ class MainWindow(QMainWindow, MappingOperations, TableZoomMixin):
                 'width_scale': w_scale,
                 'height_scale': h_scale,
                 'alignment': alignment,
+                'cell_width_px': cell_w_px,
+                'cell_height_px': cell_h_px,
             }
             if img_type == 'file':
                 base_mapping['image_path'] = img_data

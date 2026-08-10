@@ -290,12 +290,16 @@ class MappingOperations:
         out_stream.seek(0)
         return out_stream
     @staticmethod
-    def _build_aligned_anchor(anchor_str, alignment, col_width_chars, w_scale, image_width_px):
+    def _build_aligned_anchor(anchor_str, alignment, cell_width_px, image_width_px):
         """根据对齐方式构建带水平偏移的图片锚点。
 
         left:   锚定单元格左上角（默认）
         center: 水平居中
         right:  锚定单元格右侧
+
+        cell_width_px 为单元格（或合并区域）的真实像素宽度，image_width_px
+        为缩放后的图片像素宽度；两者相等（填满）时偏移为 0，图片缩小后
+        才产生居中/右对齐偏移。
         """
         if alignment == 'left':
             return anchor_str  # 默认行为，无需偏移
@@ -310,7 +314,6 @@ class MappingOperations:
         col_letter, row_num = m.group(1), int(m.group(2))
         col_idx = column_index_from_string(col_letter) - 1  # 0-based
 
-        cell_width_px = int(col_width_chars * COL_WIDTH_PX_PER_CHAR * w_scale)
         if alignment == 'center':
             offset_px = max(0, (cell_width_px - image_width_px) / 2)
         else:  # right
@@ -329,8 +332,21 @@ class MappingOperations:
             w_scale = mapping.get('width_scale', 1.0)
             h_scale = mapping.get('height_scale', 1.0)
             alignment = mapping.get('alignment', 'left')
-            target_width = int(col_width_chars * COL_WIDTH_PX_PER_CHAR * w_scale)
-            target_height = int(row_height_pts * ROW_HEIGHT_PX_PER_PT * h_scale)
+            # 目标像素尺寸：优先用添加映射时保存的精确值（合并区域按列/行逐格累计，
+            # 含 Excel 每列 5px 边距）；旧配置/外部导入回退为按锚点单元格从当前工作簿
+            # 实时计算，保证图片正好填满单元格
+            cell_w_px = mapping.get('cell_width_px')
+            cell_h_px = mapping.get('cell_height_px')
+            if cell_w_px is None or cell_h_px is None:
+                m = re.match(r'^([A-Z]+)(\d+)$', anchor)
+                if m and hasattr(self, '_cell_px'):
+                    cell_w_px, cell_h_px = self._cell_px(
+                        ws, int(m.group(2)), column_index_from_string(m.group(1)))
+                else:
+                    cell_w_px = int(col_width_chars * COL_WIDTH_PX_PER_CHAR)
+                    cell_h_px = int(row_height_pts * ROW_HEIGHT_PX_PER_PT)
+            target_width = int(cell_w_px * w_scale)
+            target_height = int(cell_h_px * h_scale)
             if 'image_path' in mapping:
                 if not os.path.exists(mapping['image_path']):
                     raise FileNotFoundError(f"图片文件不存在: {mapping['image_path']}")
@@ -342,7 +358,7 @@ class MappingOperations:
                 new_img = OpenpyxlImage(processed_stream)
                 new_img._saved_bytes = processed_stream.getvalue()
                 new_img.anchor = self._build_aligned_anchor(anchor, alignment,
-                    col_width_chars, w_scale, target_width)
+                    cell_w_px, target_width)
                 ws.add_image(new_img)
                 return
             # 配置只记录映射路径：优先按"源Sheet + 锚点位置"从当前数据源
@@ -363,7 +379,7 @@ class MappingOperations:
             new_img = OpenpyxlImage(processed_stream)
             new_img._saved_bytes = processed_stream.getvalue()
             new_img.anchor = self._build_aligned_anchor(anchor, alignment,
-                col_width_chars, w_scale, target_width)
+                cell_w_px, target_width)
             ws.add_image(new_img)
         except Exception as e:
             self._fill_warnings.append(f"图片写入失败 {mapping.get('anchor_cell', '?')}：{e}")
