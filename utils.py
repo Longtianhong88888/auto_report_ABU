@@ -30,9 +30,9 @@ def column_width_chars(ws, col_idx):
 
 
 def excel_column_width_px(width_chars):
-    """Excel 列宽(字符) → 像素：默认字体最大数字宽约 7px + 每列 5px 边距
-    （Excel 官方换算：像素 = 字符数 × 最大数字宽 + 5，默认字体下取 7）。"""
-    return int(width_chars * 7 + 5)
+    """Excel 列宽(字符) → 像素：本套模板实测列宽系数为 8
+    （像素 = 字符数 × 8，中文字体默认字号下可直接填满单元格）。"""
+    return int(width_chars * 8)
 
 
 def excel_row_height_px(height_pts):
