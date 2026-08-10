@@ -681,6 +681,14 @@ class MainWindow(QMainWindow, MappingOperations, TableZoomMixin):
         if not self.current_selection or not self.source_wb:
             QMessageBox.warning(self, "提示", "请先打开数据源文件并选中目标区域")
             return
+        # 合并单元格：点选合并区域时 selectedIndexes() 返回覆盖的全部格子，
+        # 把选区归一为单个合并单元格（左上角），避免按多行多列展开
+        ws = self.template_wb[self.current_sheet_name]
+        t_min_row, t_min_col, t_max_row, t_max_col = self.current_selection
+        merged = self._merged_range_at(ws, t_min_row, t_min_col)
+        if (merged and merged[0] <= t_min_col and merged[1] <= t_min_row
+                and merged[2] >= t_max_col and merged[3] >= t_max_row):
+            self.current_selection = (t_min_row, t_min_col, t_min_row, t_min_col)
         dlg = SourceSelectDialog(self.source_wb, self, default_sheet=self.current_sheet_name)
         if dlg.exec_():
             src_sheet, src_range = dlg.get_selection()
@@ -732,7 +740,7 @@ class MainWindow(QMainWindow, MappingOperations, TableZoomMixin):
             QMessageBox.warning(self, "提示", "请先在模板中选中目标区域")
             return
 
-        t_min_row, t_min_col, _, _ = self.current_selection
+        t_min_row, t_min_col, t_max_row, t_max_col = self.current_selection
         ws = self.template_wb[self.current_sheet_name]
         default_w, default_h = self._cell_default_size(ws, t_min_row, t_min_col)
         dlg = ImageSetupDialog(self, default_col_width=default_w,
@@ -741,24 +749,39 @@ class MainWindow(QMainWindow, MappingOperations, TableZoomMixin):
             return
         col_width_chars, row_height_pts, rotation, w_scale, h_scale, alignment = dlg.get_values()
 
-        _, _, t_max_row, t_max_col = self.current_selection
-        rows = t_max_row - t_min_row + 1
-        cols = t_max_col - t_min_col + 1
+        # 合并单元格：点选合并区域时 QTableWidget 的 selectedIndexes() 会返回
+        # 覆盖范围内的全部格子，这里按合并后的单元格识别，而不是多行多列。
+        merged = self._merged_range_at(ws, t_min_row, t_min_col)
+        if (merged and merged[0] <= t_min_col and merged[1] <= t_min_row
+                and merged[2] >= t_max_col and merged[3] >= t_max_row):
+            rows = cols = 1
+        else:
+            rows = t_max_row - t_min_row + 1
+            cols = t_max_col - t_min_col + 1
         if rows * cols == 1:
             self._add_single_image_mapping(col_width_chars, row_height_pts, rotation, w_scale, h_scale, alignment)
         else:
-            self._add_batch_image_mapping(rows, cols, col_width_chars, row_height_pts, rotation, w_scale, h_scale, alignment)
+            self._add_batch_image_mapping(rows, cols, col_width_chars, row_height_pts,
+                                          rotation, w_scale, h_scale, alignment, ws=ws)
+
+    @staticmethod
+    def _merged_range_at(ws, row, col):
+        """返回包含 (row, col) 的合并单元格区域 (min_col, min_row, max_col, max_row)；
+        未合并时返回 None。"""
+        for mr in ws.merged_cells.ranges:
+            m_min_col, m_min_row, m_max_col, m_max_row = range_boundaries(str(mr))
+            if m_min_row <= row <= m_max_row and m_min_col <= col <= m_max_col:
+                return (m_min_col, m_min_row, m_max_col, m_max_row)
+        return None
 
     def _cell_default_size(self, ws, row, col):
         """锚点单元格（或所在合并区域）的默认图片尺寸：列宽(字符)、行高(磅)。
         合并单元格按整个合并区域求和，未合并则取单格大小。"""
         col_span = row_span = 1
-        for mr in ws.merged_cells.ranges:
-            m_min_col, m_min_row, m_max_col, m_max_row = range_boundaries(str(mr))
-            if m_min_row <= row <= m_max_row and m_min_col <= col <= m_max_col:
-                col_span = m_max_col - m_min_col + 1
-                row_span = m_max_row - m_min_row + 1
-                break
+        merged = self._merged_range_at(ws, row, col)
+        if merged:
+            col_span = merged[2] - merged[0] + 1
+            row_span = merged[3] - merged[1] + 1
         width_chars = sum(
             column_width_chars(ws, c)
             for c in range(col, col + col_span)
@@ -770,6 +793,26 @@ class MainWindow(QMainWindow, MappingOperations, TableZoomMixin):
             else:
                 height_pts += ws.sheet_format.defaultRowHeight or DEFAULT_ROW_HEIGHT_PTS
         return round(width_chars, 1), round(height_pts, 1)
+
+    def _logical_cells_in_region(self, ws, min_row, min_col, max_row, max_col):
+        """行优先枚举区域内的逻辑单元格：合并区域只取左上角一个位置，
+        未合并的格子逐个返回（供批量图片/选区展开使用）。"""
+        covered = set()
+        for mr in ws.merged_cells.ranges:
+            m_min_col, m_min_row, m_max_col, m_max_row = range_boundaries(str(mr))
+            if (m_max_col < min_col or m_max_row < min_row
+                    or m_min_col > max_col or m_min_row > max_row):
+                continue
+            for r in range(max(m_min_row, min_row), min(m_max_row, max_row) + 1):
+                for c in range(max(m_min_col, min_col), min(m_max_col, max_col) + 1):
+                    if (r, c) != (m_min_row, m_min_col):
+                        covered.add((r, c))
+        cells = []
+        for r in range(min_row, max_row + 1):
+            for c in range(min_col, max_col + 1):
+                if (r, c) not in covered:
+                    cells.append((r, c))
+        return cells
 
     def _add_single_image_mapping(self, col_width_chars, row_height_pts, rotation, w_scale, h_scale, alignment='left'):
         t_row, t_col, _, _ = self.current_selection
@@ -843,7 +886,7 @@ class MainWindow(QMainWindow, MappingOperations, TableZoomMixin):
                 self.mappings.append(mapping)
                 self.refresh_mapping_list()
 
-    def _add_batch_image_mapping(self, rows, cols, col_width_chars, row_height_pts, rotation, w_scale, h_scale, alignment='left'):
+    def _add_batch_image_mapping(self, rows, cols, col_width_chars, row_height_pts, rotation, w_scale, h_scale, alignment='left', ws=None):
         if not self.source_wb:
             QMessageBox.warning(self, "提示", "请先打开数据源文件")
             return
@@ -858,47 +901,50 @@ class MainWindow(QMainWindow, MappingOperations, TableZoomMixin):
         if not images:
             QMessageBox.warning(self, "图片不足", "未选择任何图片，无法添加批量图片映射")
             return
-        need = rows * cols
+        t_min_row, t_min_col, t_max_row, t_max_col = self.current_selection
+        # 区域内合并单元格只占一个图片位（左上角锚点），覆盖格不重复放图，
+        # 避免同一合并区域叠放多张图片
+        logical_cells = self._logical_cells_in_region(
+            ws, t_min_row, t_min_col, t_max_row, t_max_col)
+        need = len(logical_cells)
         if len(images) > need:
             QMessageBox.warning(self, "图片超出目标区域",
-                f"目标区域共 {need} 个单元格，选择了 {len(images)} 张图片，"
+                f"目标区域共 {need} 个单元格（合并单元格按 1 个计算），"
+                f"选择了 {len(images)} 张图片，"
                 "仅保留前 " + str(need) + " 张。")
             images = images[:need]
-        t_min_row, t_min_col, _, _ = self.current_selection
-        _, _, t_max_row, t_max_col = self.current_selection
         # PBO→MBO 时图片数少于模板区域：整区清空旧图片，新图按顺序从左上角填入，
         # 未填位置保持空白，避免残留 PBO 图片
         clear_region = (t_min_row, t_min_col, t_max_row, t_max_col)
         count = 0
-        for r in range(rows):
-            for c in range(cols):
-                if count >= len(images):
-                    break
-                anchor = f"{get_column_letter(t_min_col + c)}{t_min_row + r}"
-                img_type, img_data = images[count]
-                count += 1
-                base_mapping = {
-                    'type': 'image',
-                    'target_sheet': self.current_sheet_name,
-                    'anchor_cell': anchor,
-                    'clear_region': clear_region,
-                    'col_width_chars': col_width_chars,
-                    'row_height_pts': row_height_pts,
-                    'rotation': rotation,
-                    'width_scale': w_scale,
-                    'height_scale': h_scale,
-                    'alignment': alignment,
-                }
-                if img_type == 'file':
-                    base_mapping['image_path'] = img_data
-                else:
-                    base_mapping['image_bytes'] = img_data[3]
-                    base_mapping['image_ref'] = [img_data[0], img_data[1]]
-                    base_mapping['image_src_sheet'] = img_data[0]
-                    base_mapping['image_src_pos'] = img_data[2]
-                    base_mapping['orig_width'] = img_data[4]
-                    base_mapping['orig_height'] = img_data[5]
-                self.mappings.append(base_mapping)
+        for anchor_r, anchor_c in logical_cells:
+            if count >= len(images):
+                break
+            anchor = f"{get_column_letter(anchor_c)}{anchor_r}"
+            img_type, img_data = images[count]
+            count += 1
+            base_mapping = {
+                'type': 'image',
+                'target_sheet': self.current_sheet_name,
+                'anchor_cell': anchor,
+                'clear_region': clear_region,
+                'col_width_chars': col_width_chars,
+                'row_height_pts': row_height_pts,
+                'rotation': rotation,
+                'width_scale': w_scale,
+                'height_scale': h_scale,
+                'alignment': alignment,
+            }
+            if img_type == 'file':
+                base_mapping['image_path'] = img_data
+            else:
+                base_mapping['image_bytes'] = img_data[3]
+                base_mapping['image_ref'] = [img_data[0], img_data[1]]
+                base_mapping['image_src_sheet'] = img_data[0]
+                base_mapping['image_src_pos'] = img_data[2]
+                base_mapping['orig_width'] = img_data[4]
+                base_mapping['orig_height'] = img_data[5]
+            self.mappings.append(base_mapping)
         self.refresh_mapping_list()
 
     # ==================== 版本号查找 ====================
@@ -974,6 +1020,10 @@ class MainWindow(QMainWindow, MappingOperations, TableZoomMixin):
                 except ValueError:
                     pass
             row, col = header_cells[key]
+            merged = self._merged_range_at(ws, row, col)
+            if merged:
+                # 值单元格若处于合并区域覆盖格（只读），写入合并区域左上角
+                row, col = merged[1], merged[0]
             ws.cell(row=row, column=col).value = value
             self.cell_edits.append([self.current_sheet_name, row, col, value])
             filled += 1
@@ -1013,16 +1063,35 @@ class MainWindow(QMainWindow, MappingOperations, TableZoomMixin):
             )
             max_col = min(ws.max_column, content_max_col)
             right_col = t_min_col
-            # 只扫表头行：从锚定列向右，找到最后一个表头有内容的列（无列数上限）
-            for col in range(t_min_col, max_col + 1):
+            # 只扫表头行：从锚定列向右，找到最后一个表头有内容的列（无列数上限）。
+            # 表头可能使用横向合并单元格（如组表头），合并区域只有左上角有值，
+            # 逐列扫描会在覆盖列提前截断；这里把有内容的合并区域整体视为一个表头块。
+            merged_span_right = {}  # 列 -> 该列所在有内容合并区域的末列
+            for mr in ws.merged_cells.ranges:
+                m_min_col, m_min_row, m_max_col, m_max_row = range_boundaries(str(mr))
+                if m_max_col < t_min_col or m_min_col > max_col:
+                    continue
+                if m_max_row < t_min_row or m_min_row > t_min_row + header_rows - 1:
+                    continue
+                if ws.cell(row=m_min_row, column=m_min_col).value is None:
+                    continue
+                for c in range(max(m_min_col, t_min_col), min(m_max_col, max_col) + 1):
+                    merged_span_right[c] = max(merged_span_right.get(c, c), m_max_col)
+            col = t_min_col
+            while col <= max_col:
+                span_right = merged_span_right.get(col)
+                if span_right is not None:
+                    right_col = max(right_col, span_right)
+                    col = span_right + 1
+                    continue
                 has_value = False
                 for r in range(t_min_row, t_min_row + header_rows):
-                    cell = ws.cell(row=r, column=col)
-                    if cell.value is not None:
+                    if ws.cell(row=r, column=col).value is not None:
                         has_value = True
                         break
                 if has_value:
                     right_col = col
+                    col += 1
                 else:
                     break
 
@@ -1127,11 +1196,23 @@ class MainWindow(QMainWindow, MappingOperations, TableZoomMixin):
         labels = dlg.get_labels()
         mode = mapping['mode']
 
+        # 合并单元格：点选合并区域时 selectedIndexes() 返回覆盖的全部格子，
+        # 把选区归一为单个合并单元格（左上角），按 1 个单元格参与数量匹配
+        sel = None
+        if self.current_selection:
+            t_min_row, t_min_col, t_max_row, t_max_col = self.current_selection
+            ws = self.template_wb[self.current_sheet_name]
+            merged = self._merged_range_at(ws, t_min_row, t_min_col)
+            if (merged and merged[0] <= t_min_col and merged[1] <= t_min_row
+                    and merged[2] >= t_max_col and merged[3] >= t_max_row):
+                t_max_row, t_max_col = t_min_row, t_min_col
+            sel = (t_min_row, t_min_col, t_max_row, t_max_col)
+
         if mode == 'labeled' and labels:
             # 多值模式：每张图一行，每标签占一列
             cell_count = img_count * len(labels)
-            if self.current_selection:
-                t_min_row, t_min_col, t_max_row, t_max_col = self.current_selection
+            if sel:
+                t_min_row, t_min_col, t_max_row, t_max_col = sel
                 selected_cells = (t_max_row - t_min_row + 1) * (t_max_col - t_min_col + 1)
                 if selected_cells == cell_count:
                     # 完美匹配：按行展开（每张图一行，每标签一列）
@@ -1164,8 +1245,8 @@ class MainWindow(QMainWindow, MappingOperations, TableZoomMixin):
                 return
         else:
             # 单值模式：每张图一个单元格
-            if self.current_selection:
-                t_min_row, t_min_col, t_max_row, t_max_col = self.current_selection
+            if sel:
+                t_min_row, t_min_col, t_max_row, t_max_col = sel
                 selected_cells = (t_max_row - t_min_row + 1) * (t_max_col - t_min_col + 1)
                 if selected_cells == img_count:
                     mapping['target_cells'] = []

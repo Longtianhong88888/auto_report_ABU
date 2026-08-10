@@ -6,6 +6,7 @@ import openpyxl
 from openpyxl.utils import range_boundaries, get_column_letter, column_index_from_string
 from openpyxl.drawing.image import Image as OpenpyxlImage
 from openpyxl.styles import Border, Side
+from openpyxl.cell.cell import MergedCell
 from PIL import Image as PILImage
 
 # 本地受信任的高分辨率图片（显微镜切片图常超 Pillow 默认像素上限）：
@@ -20,6 +21,21 @@ from safe_eval import _safe_eval_transform
 
 class MappingOperations:
     """数据/图片/归档/JMP 映射执行逻辑（供 MainWindow 混入）"""
+    @staticmethod
+    def _is_merge_covered(ws, row, col):
+        """判断 (row, col) 是否为合并单元格的覆盖格（非左上角，值只读）"""
+        return isinstance(ws.cell(row=row, column=col), MergedCell)
+
+    def _write_cell_value(self, ws, row, col, value):
+        """安全写入单元格：合并单元格覆盖格只读，跳过并记录告警，
+        避免整条映射因写 MergedCell 而失败。"""
+        if self._is_merge_covered(ws, row, col):
+            self._fill_warnings.append(
+                f"{ws.title}!{get_column_letter(col)}{row} 是合并单元格的覆盖格，已跳过写入")
+            return False
+        ws.cell(row=row, column=col).value = value
+        return True
+
     @staticmethod
     def _archive_blocks_overlap(block1, block2):
         """两个归档区块是否重叠：行区间与列区间都相交才算重叠"""
@@ -182,7 +198,7 @@ class MappingOperations:
                     self._warn_error_value(val,
                         f"{src_ws.title}!{get_column_letter(src_col)}{src_row}",
                         f"{ws.title}!{get_column_letter(dst_col)}{dst_row}")
-                    ws.cell(row=dst_row, column=dst_col).value = val
+                    self._write_cell_value(ws, dst_row, dst_col, val)
     @staticmethod
     def _image_anchor_row_col(img):
         """图片锚点 → (行, 列)。兼容 openpyxl 对象锚点与字符串锚点
@@ -399,10 +415,10 @@ class MappingOperations:
                 self._warn_error_value(src_cell.value,
                     f"{data_ws.title}!{get_column_letter(col)}{row}",
                     f"{ws.title}!{get_column_letter(col + 1)}{row}")
-                dst_cell.value = src_cell.value
+                self._write_cell_value(ws, row, col + 1, src_cell.value)
                 self.copy_cell_style(ws.cell(row=row, column=col), dst_cell)
         for row in range(min_row, max_row + 1):
-            ws.cell(row=row, column=min_col).value = None
+            self._write_cell_value(ws, row, min_col, None)
         for mr in merged_to_shift:
             m_min_col, m_min_row, m_max_col, m_max_row = range_boundaries(mr)
             ws.merge_cells(f"{get_column_letter(m_min_col+1)}{m_min_row}:{get_column_letter(m_max_col+1)}{m_max_row}")
@@ -413,7 +429,7 @@ class MappingOperations:
             row_idx = min_row + i
             cell = ws.cell(row=row_idx, column=min_col)
             if i < len(new_headers):
-                cell.value = new_headers[i]
+                self._write_cell_value(ws, row_idx, min_col, new_headers[i])
             self.copy_cell_style(ws.cell(row=row_idx, column=min_col + 1), cell)
         # 填充新数据：默认取同一Sheet"来源列"的数值版（data_ws）写入新列
         data_start_row = min_row + header_rows
@@ -430,7 +446,7 @@ class MappingOperations:
                     self._warn_error_value(src_cell.value,
                         f"{data_ws.title}!{get_column_letter(src_col_idx)}{target_row}",
                         f"{ws.title}!{get_column_letter(min_col)}{target_row}")
-                    dst_cell.value = src_cell.value
+                    self._write_cell_value(ws, target_row, min_col, src_cell.value)
                     self.copy_cell_style(ws.cell(row=target_row, column=min_col + 1),
                                          ws.cell(row=target_row, column=min_col))
                 # 来源列整体为空：通常是文件未由 Excel 保存过，公式缓存值缺失
@@ -462,7 +478,7 @@ class MappingOperations:
                 self._warn_error_value(src_cell.value,
                     f"{src_ws.title}!{get_column_letter(s_min_col)}{src_row}",
                     f"{ws.title}!{get_column_letter(min_col)}{target_row}")
-                dst_cell.value = src_cell.value
+                self._write_cell_value(ws, target_row, min_col, src_cell.value)
                 self.copy_cell_style(ws.cell(row=target_row, column=min_col + 1),
                                      ws.cell(row=target_row, column=min_col))
         # 归档完成后：对数据块（含新列）执行"全部框线 + 粗外框"
@@ -501,11 +517,10 @@ class MappingOperations:
                 current_row = start_row + row_offset
                 # 写入表头
                 for idx, header_text in enumerate(headers):
-                    cell = ws.cell(row=current_row, column=start_col + idx)
-                    cell.value = header_text
+                    self._write_cell_value(ws, current_row, start_col + idx, header_text)
                 # 写入数据
                 val = values[row_offset]
-                ws.cell(row=current_row, column=data_start_col, value=val)
+                self._write_cell_value(ws, current_row, data_start_col, val)
                 # 复制格式（整行）
                 for col_idx in range(start_col, data_start_col + 1):
                     ref_cell = ws.cell(row=ref_row, column=col_idx)
@@ -518,12 +533,11 @@ class MappingOperations:
                 current_row = start_row + row_offset
                 # 写入表头
                 for idx, header_text in enumerate(headers):
-                    cell = ws.cell(row=current_row, column=start_col + idx)
-                    cell.value = header_text
+                    self._write_cell_value(ws, current_row, start_col + idx, header_text)
                 # 写入数据
                 for c in range(target_data_cols):
                     src_val = src_ws.cell(row=s_min_row + row_offset, column=s_min_col + c).value
-                    ws.cell(row=current_row, column=data_start_col + c, value=src_val)
+                    self._write_cell_value(ws, current_row, data_start_col + c, src_val)
                 # 复制格式
                 for col_idx in range(start_col, data_start_col + target_data_cols):
                     ref_cell = ws.cell(row=ref_row, column=col_idx)
@@ -599,13 +613,13 @@ class MappingOperations:
                         if val is None:
                             self._fill_warnings.append(
                                 f"{cell_addr} <- {img_name}/{label}：未识别到数值")
-                        ws.cell(row=row, column=col).value = val
+                        self._write_cell_value(ws, row, col, val)
                 elif isinstance(tc, (list, tuple)) and len(tc) >= 1:
                     # 单行模式：取第一个标签值写入单个单元格
                     row, col = tc[0], tc[1]
                     first_label = labels[0] if labels else None
                     val = result.get(first_label) if first_label else result.get('value')
-                    ws.cell(row=row, column=col).value = val
+                    self._write_cell_value(ws, row, col, val)
             else:
                 # 单值/全部数值/自定义模式：每张图对应一个 target_cell
                 if isinstance(tc, (list, tuple)):
@@ -619,17 +633,17 @@ class MappingOperations:
                         self._fill_warnings.append(
                             f"{cell_addr} <- {img_name}：未识别到数值")
                     elif len(vals) == 1:
-                        ws.cell(row=row, column=col).value = vals[0]
+                        self._write_cell_value(ws, row, col, vals[0])
                     else:
                         # 多个数值：目标只有单格时以逗号拼接写入
-                        ws.cell(row=row, column=col).value = \
-                            ', '.join(str(v) for v in vals)
+                        self._write_cell_value(
+                            ws, row, col, ', '.join(str(v) for v in vals))
                 else:
                     val = result.get('value')
                     if val is None:
                         self._fill_warnings.append(
                             f"{cell_addr} <- {img_name}：未识别到数值")
-                    ws.cell(row=row, column=col).value = val
+                    self._write_cell_value(ws, row, col, val)
 
     @staticmethod
     def copy_cell_style(src, dst):

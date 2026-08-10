@@ -515,6 +515,15 @@ class SourceSelectDialog(QDialog, TableZoomMixin):
         left = min(idx.column() for idx in indexes) + 1
         bottom = max(idx.row() for idx in indexes) + 1
         right = max(idx.column() for idx in indexes) + 1
+        # 合并单元格：selectedIndexes() 会返回合并区域覆盖的全部格子，
+        # 整个选区若完全落在同一合并区域内，按单个合并单元格（左上角）识别
+        ws = self.source_wb[self.sheet_combo.currentText()]
+        for mr in ws.merged_cells.ranges:
+            m_min_col, m_min_row, m_max_col, m_max_row = range_boundaries(str(mr))
+            if (m_min_row <= top <= m_max_row and m_min_col <= left <= m_max_col
+                    and m_min_row <= bottom <= m_max_row and m_min_col <= right <= m_max_col):
+                bottom, right = top, left
+                break
         self.selected_range = (top, left, bottom, right)
         addr = f"{get_column_letter(left)}{top}:{get_column_letter(right)}{bottom}"
         self.range_label.setText(addr)
